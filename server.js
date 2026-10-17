@@ -196,6 +196,20 @@ app.post('/api/keys', (req, res) => {
   return res.status(200).json({ success: true, downloadUrl, key });
 });
 
+app.get('/api/devices', (req, res) => {
+  const username = getLoggedInUsername(req);
+  const list = Array.from(agents.entries())
+    .filter(([id, data]) => data.owner === username || data.owner === 'admin')
+    .map(([id, data]) => ({
+      id,
+      name: data.name,
+      online: data.online,
+      meta: data.meta,
+      lastSeen: data.lastSeen
+    }));
+  res.status(200).json({ success: true, devices: list });
+});
+
 app.post('/api/keys/delete', (req, res) => {
   const username = getLoggedInUsername(req);
   const { key } = req.body;
