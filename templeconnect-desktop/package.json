@@ -1,0 +1,30 @@
+{
+  "name": "templeconnect-desktop",
+  "version": "1.0.0",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder",
+    "dist": "electron-builder"
+  },
+  "build": {
+    "appId": "com.templeconnect.desktop",
+    "productName": "TempleConnect",
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "protocols": {
+      "name": "TempleConnect Protocol",
+      "schemes": [
+        "templeconnect"
+      ]
+    }
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.13.3"
+  }
+}

@@ -1,0 +1,787 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TempleConnect</title>
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#2f6bff" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icon.svg" />
+    <link rel="stylesheet" href="app.css?v=mv5gn74d" />
+    <!--
+      v2 overlay stylesheet. Loaded AFTER app.css so its tokens + component
+      tweaks override. Easy revert paths:
+        • `?legacy=1`                  — URL param, one-shot (sticks for the tab)
+        • `localStorage.hcTheme='legacy'` — persistent per-browser
+        • Just delete the <link> below to roll back for everyone.
+    -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link id="hc-v2-font" rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" />
+    <link id="hc-v2-css" rel="stylesheet" href="app.v2.css?v=mv5gn74d" />
+    <script>
+      (function () {
+        var legacy = /[?&]legacy=1/.test(location.search);
+        try { if (!legacy && localStorage.getItem('hcTheme') === 'legacy') legacy = true; } catch (e) {}
+        if (location.search.indexOf('legacy=1') >= 0) { try { localStorage.setItem('hcTheme','legacy'); } catch(e){} }
+        if (location.search.indexOf('legacy=0') >= 0) { try { localStorage.removeItem('hcTheme'); } catch(e){} legacy = false; }
+        if (legacy) {
+          var v = document.getElementById('hc-v2-css'); if (v) v.remove();
+          var f = document.getElementById('hc-v2-font'); if (f) f.remove();
+        } else {
+          // Marker consumed by both the v2 CSS (via [data-v2] selectors) and
+          // the HC_V2 constant in app.js. Set BEFORE body renders so first
+          // paint already uses the grid/table layout.
+          document.documentElement.setAttribute('data-v2', '1');
+        }
+      })();
+    </script>
+    <script>
+      // Service worker: one-time flush of any stale cache from older builds,
+      // then re-register the current sw.js. Older variants cached the app
+      // shell and kept serving the pre-redesign CSS on refresh — this
+      // forcibly clears every CacheStorage bucket before re-registering.
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', async function () {
+          try { if (window.caches) { const keys = await caches.keys(); await Promise.all(keys.map(function (k) { return caches.delete(k); })); } } catch (e) {}
+          try { navigator.serviceWorker.register('/sw.js').catch(function(){}); } catch (e) {}
+        });
+      }
+    </script>
+  </head>
+  <body>
+    <!-- ============================= AUTH ============================= -->
+    <div id="auth-view" class="auth-view">
+      <div class="auth-bg"></div>
+      <div class="auth-card">
+        <div class="auth-logo">
+          <svg viewBox="0 0 32 32" width="46" height="46" aria-hidden="true">
+            <rect x="1.2" y="1.2" width="29.6" height="29.6" rx="8" fill="#2f6bff"/>
+            <circle cx="10" cy="16" r="3.1" fill="#fff"/>
+            <circle cx="22" cy="16" r="3.1" fill="#fff"/>
+            <path d="M12.6 16h6.8" stroke="#fff" stroke-width="2.1" stroke-linecap="round"/>
+            <path d="M10 12.4V9M22 12.4V9M10 19.6V23M22 19.6V23" stroke="rgba(255,255,255,.55)" stroke-width="1.6" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <h1 class="auth-title">TempleConnect</h1>
+        <p class="auth-sub">Sign in to your control dashboard</p>
+        <form id="auth-form" autocomplete="on">
+          <label class="field">
+            <span>Username</span>
+            <input id="au-email" type="text" placeholder="you@company.com" autocomplete="username" required />
+          </label>
+          <label class="field">
+            <span>Password</span>
+            <input id="au-pass" type="password" placeholder="••••••••" autocomplete="current-password" required />
+          </label>
+          <button id="au-submit" type="submit" class="btn primary block">
+            <span class="btn-label">Sign in</span>
+          </button>
+          <div id="auth-err" class="err"></div>
+        </form>
+        <div id="auth-support" hidden style="margin-top:18px;padding-top:16px;border-top:1px solid var(--line,#e6e8ef);display:flex;align-items:center;justify-content:center;gap:10px;font-size:13px;color:var(--muted,#7a869a)">
+          <span>Need help?</span>
+          <a id="auth-tg" href="#" target="_blank" rel="noopener" title="Message support on Telegram" style="display:inline-flex;align-items:center;gap:5px;color:var(--accent,#2f6bff);text-decoration:none;font-weight:600">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M21 5 3 12l5 2 2 5 3-4 4 3z" stroke-linejoin="round"/></svg>Message support on Telegram</a>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================= APP ============================= -->
+    <div id="app-view" class="app-shell" hidden>
+      <!-- Sidebar -->
+      <aside class="sidebar">
+        <div class="side-brand">
+          <svg viewBox="0 0 32 32" width="28" height="28" aria-hidden="true">
+            <rect x="1.2" y="1.2" width="29.6" height="29.6" rx="8" fill="#2f6bff"/>
+            <circle cx="10" cy="16" r="3.1" fill="#fff"/>
+            <circle cx="22" cy="16" r="3.1" fill="#fff"/>
+            <path d="M12.6 16h6.8" stroke="#fff" stroke-width="2.1" stroke-linecap="round"/>
+            <path d="M10 12.4V9M22 12.4V9M10 19.6V23M22 19.6V23" stroke="rgba(255,255,255,.55)" stroke-width="1.6" stroke-linecap="round"/>
+          </svg>
+          <span>Temple<b>Connect</b></span>
+        </div>
+
+        <nav class="side-nav">
+          <button class="nav-item active" data-view="devices">
+            <svg viewBox="0 0 24 24" class="ic"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            <span>Devices</span>
+          </button>
+          <button class="nav-item" data-view="enrollment">
+            <svg viewBox="0 0 24 24" class="ic"><path d="M12 3v12m0 0l-4-4m4 4l4-4"/><path d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg>
+            <span>Enrollment</span>
+          </button>
+          <button class="nav-item" data-view="alerts">
+            <svg viewBox="0 0 24 24" class="ic"><path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 01-3.4 0"/></svg>
+            <span>Alerts</span>
+          </button>
+          <button class="nav-item owner-only" data-view="accounts" hidden>
+            <svg viewBox="0 0 24 24" class="ic"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 20a5.5 5.5 0 0111 0"/><path d="M17 8h4M19 6v4"/></svg>
+            <span>Accounts</span>
+          </button>
+          <button class="nav-item" data-view="settings">
+            <svg viewBox="0 0 24 24" class="ic"><circle cx="12" cy="12" r="3.2"/><path d="M19 12a7 7 0 00-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 00-2-1.2l-.3-2.5H9.7l-.3 2.5a7 7 0 00-2 1.2l-2.3-1-2 3.4 2 1.5A7 7 0 005 12a7 7 0 00.1 1.2l-2 1.5 2 3.4 2.3-1a7 7 0 002 1.2l.3 2.5h4.6l.3-2.5a7 7 0 002-1.2l2.3 1 2-3.4-2-1.5A7 7 0 0019 12z"/></svg>
+            <span>Settings</span>
+          </button>
+          <button class="nav-item" data-view="support">
+            <svg viewBox="0 0 24 24" class="ic"><path d="M21 15a2 2 0 01-2 2H8l-4 4V5a2 2 0 012-2h13a2 2 0 012 2z"/><path d="M9 10h.01M12.5 10h.01M16 10h.01"/></svg>
+            <span>Support</span>
+          </button>
+        </nav>
+
+        <div class="side-foot">
+          <div class="side-user">
+            <div class="avatar" id="side-avatar">A</div>
+            <div class="su-meta">
+              <div class="su-name" id="side-name">-</div>
+              <div class="su-role" id="side-role">admin</div>
+            </div>
+          </div>
+          <button id="logout" class="btn ghost block small">Sign out</button>
+        </div>
+      </aside>
+
+      <!-- Main -->
+      <main class="main">
+        <!-- ===== DEVICES ===== -->
+        <section class="page" data-page="devices">
+          <div class="page-head">
+            <div>
+              <h1 class="page-title">Devices</h1>
+              <p class="page-sub">Machines enrolled under your account</p>
+            </div>
+            <div class="page-actions">
+              <div class="search">
+                <svg viewBox="0 0 24 24" class="ic"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>
+                <input id="dev-search" type="text" placeholder="Search devices…" />
+              </div>
+              <button id="refresh-dev" class="btn ghost icon" title="Refresh">
+                <svg viewBox="0 0 24 24" class="ic"><path d="M20 11a8 8 0 10-2 5"/><path d="M20 4v6h-6"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="stats stats-auto" id="stats">
+            <div class="stat"><div class="stat-top"><span class="stat-label">Total</span><span class="stat-ic total">●</span></div><div class="stat-num" id="st-total">0</div></div>
+            <div class="stat"><div class="stat-top"><span class="stat-label">Online</span><span class="stat-ic online">●</span></div><div class="stat-num" id="st-online">0</div></div>
+            <div class="stat"><div class="stat-top"><span class="stat-label">In session</span><span class="stat-ic busy">●</span></div><div class="stat-num" id="st-busy">0</div></div>
+            <div class="stat"><div class="stat-top"><span class="stat-label">Sleeping</span><span class="stat-ic sleep">●</span></div><div class="stat-num" id="st-sleep">0</div></div>
+            <div class="stat"><div class="stat-top"><span class="stat-label">Offline</span><span class="stat-ic offline">●</span></div><div class="stat-num" id="st-offline">0</div></div>
+            <div class="stat"><div class="stat-top"><span class="stat-label">Uninstalled</span><span class="stat-ic uninstalled">●</span></div><div class="stat-num" id="st-uninstalled">0</div></div>
+          </div>
+
+          <div class="seg" id="dev-filter">
+            <button class="seg-btn active" data-f="all">All</button>
+            <button class="seg-btn" data-f="online">Online</button>
+            <button class="seg-btn" data-f="sleep">Sleeping</button>
+            <button class="seg-btn" data-f="offline">Offline</button>
+            <button class="seg-btn" data-f="uninstalled">Uninstalled</button>
+            <button class="seg-btn" data-f="new" title="Installed in the last 7 days">Newly installed</button>
+            <button class="seg-btn" data-f="old" title="Installed over 30 days ago">Older</button>
+          </div>
+
+          <div id="devices" class="device-list"></div>
+          <div id="dev-empty" class="empty" hidden>
+            <div class="empty-ic"><svg viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div>
+            <h3>No devices yet</h3>
+            <p>Create an enrollment link and send it to the machine you want to manage.</p>
+            <button class="btn primary" data-goto="enrollment">Go to Enrollment</button>
+          </div>
+        </section>
+
+        <!-- ===== ENROLLMENT ===== -->
+        <section class="page" data-page="enrollment" hidden>
+          <div class="page-head">
+            <div>
+              <h1 class="page-title">Enrollment</h1>
+              <p class="page-sub">Links people run to add their machine to your account</p>
+            </div>
+            <div class="page-actions">
+              <label class="btn ghost owner-only" id="upload-label" hidden>
+                <svg viewBox="0 0 24 24" class="ic"><path d="M12 16V4m0 0l-4 4m4-4l4 4"/><path d="M4 20h16"/></svg>
+                <span>Upload installer</span>
+                <input id="installer-file" type="file" accept=".exe" hidden />
+              </label>
+              <label class="btn ghost owner-only" id="blank-upload-label" hidden title="One image, GIF, or looping video all users see on the blanked screen (instead of black)">
+                <svg viewBox="0 0 24 24" class="ic"><path d="M4 5h16v14H4z"/><path d="M4 15l5-5 4 4 3-3 4 4"/><circle cx="9" cy="9" r="1.5"/></svg>
+                <span>Blank cover</span>
+                <input id="blank-image-file" type="file" accept="image/*,video/*" hidden />
+              </label>
+              <button id="new-key" class="btn primary">Build +</button>
+            </div>
+          </div>
+
+          <div class="stats stats-4" id="enroll-stats">
+            <div class="stat"><div class="stat-top"><span class="stat-label">Downloads</span><svg viewBox="0 0 24 24" class="ic stat-svg dl"><path d="M12 16V4m0 0l-4 4m4-4l4 4"/><path d="M4 20h16"/></svg></div><div class="stat-num" id="mt-downloads">0</div><div class="stat-foot">installer fetched</div></div>
+            <div class="stat"><div class="stat-top"><span class="stat-label">Installs</span><svg viewBox="0 0 24 24" class="ic stat-svg in"><path d="M20 6L9 17l-5-5"/></svg></div><div class="stat-num" id="mt-installs">0</div><div class="stat-foot"><span id="mt-active">0</span> still active</div></div>
+            <div class="stat"><div class="stat-top"><span class="stat-label">Conversion</span><svg viewBox="0 0 24 24" class="ic stat-svg cv"><path d="M3 17l6-6 4 4 8-8"/><path d="M21 7v6h-6"/></svg></div><div class="stat-num"><span id="mt-conversion">0</span>%</div><div class="stat-foot">download → install</div></div>
+            <div class="stat"><div class="stat-top"><span class="stat-label">Uninstalls</span><svg viewBox="0 0 24 24" class="ic stat-svg un"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg></div><div class="stat-num" id="mt-uninstalls">0</div><div class="stat-foot"><span id="mt-unrate">0</span>% churn rate</div></div>
+          </div>
+
+          <div id="installer-banner" class="banner warn" hidden>
+            <span><svg viewBox="0 0 24 24" class="ic"><path d="M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L14.4 3.9a2 2 0 00-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>Upload your <b>installer</b> once so these links can be downloaded.</span>
+          </div>
+          <div id="upload-status" class="hint"></div>
+          <div id="blank-image-row" class="owner-only" hidden style="display:flex;align-items:center;gap:12px;margin-top:8px">
+            <img id="blank-image-preview" alt="" style="height:48px;border-radius:6px;border:1px solid var(--line2);display:none" />
+            <video id="blank-image-preview-vid" muted loop autoplay playsinline style="height:60px;border-radius:6px;border:1px solid var(--line2);display:none"></video>
+            <span id="blank-image-status" class="hint"></span>
+            <button id="blank-image-remove" class="btn ghost small" hidden>Remove</button>
+          </div>
+
+          <h3 class="sub-h">Your links</h3>
+          <div class="banner info"><svg viewBox="0 0 24 24" class="ic"><path d="M9 18h6M10 21h4M12 3a6 6 0 00-4 10.5c.6.6 1 1.5 1 2.5h6c0-1 .4-1.9 1-2.5A6 6 0 0012 3z"/></svg>
+            <span>Each link has two versions — both enroll the machine to <b>your</b> account:
+            <b>.exe</b> = the installer (they double-click it, installs silently) · <b>.vbs</b> = one-click silent installer (no window at all).
+            Use <b>Copy .exe link</b> / <b>Copy .vbs link</b> to share, or <b>Download</b> to grab the file yourself. The key is baked into the download filename, so a device enrolls automatically. (A raw installer with no key won't appear here.)</span></div>
+          <div id="keys" class="link-list"></div>
+
+          <div class="owner-only" id="enrolllog-wrap" hidden>
+            <h3 class="sub-h" style="display:flex;align-items:center;justify-content:space-between">Recent install attempts <button id="enrolllog-refresh" class="btn ghost small">Refresh</button></h3>
+            <p class="hint" style="margin:-6px 0 10px">Every machine that tried to enroll — and exactly why it did or didn't show up. If an install runs but never appears, the reason is here.</p>
+            <div id="enrolllog" class="link-list"></div>
+          </div>
+        </section>
+
+        <!-- ===== ALERTS ===== -->
+        <section class="page" data-page="alerts" hidden>
+          <div class="page-head">
+            <div>
+              <h1 class="page-title">Telegram alerts</h1>
+              <p class="page-sub">Get a Telegram message when your devices come and go</p>
+            </div>
+            <div class="page-actions">
+              <button id="alerts-test" class="btn ghost">Send test</button>
+              <button id="alerts-save" class="btn primary">Save</button>
+            </div>
+          </div>
+
+          <div class="alerts-conn">
+            <div class="field">
+              <span>Bot token</span>
+              <input id="al-token" type="text" placeholder="123456789:AAF...your bot token" autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="field">
+              <span>Chat ID</span>
+              <div style="display:flex;gap:8px;align-items:stretch">
+                <input id="al-chat" type="text" placeholder="e.g. 123456789 (your chat with the bot)" autocomplete="off" spellcheck="false" style="flex:1" />
+                <button id="al-detect" type="button" class="btn ghost" title="Auto-detect your Chat ID from your bot">Find my Chat ID</button>
+              </div>
+            </div>
+            <details class="alerts-help" open>
+              <summary>How do I set this up?</summary>
+              <ol>
+                <li>In Telegram, message <b>@BotFather</b> → <code>/newbot</code> → copy the <b>bot token</b> and paste it above.</li>
+                <li><b>Open your new bot in Telegram and tap Start</b> (or send it any message). This step is required — a bot can't message you until you do.</li>
+                <li>Click <b>Find my Chat ID</b> above — it fills in your Chat ID automatically.</li>
+                <li>Hit <b>Send test</b> to confirm, then <b>Save</b>.</li>
+              </ol>
+            </details>
+          </div>
+
+          <h3 class="sub-h">Alerts</h3>
+          <p class="hint">Toggle each alert and edit its message. Placeholders: <code>{device}</code> <code>{os}</code> <code>{user}</code> <code>{host}</code> <code>{time}</code></p>
+          <div id="alerts-rules" class="alerts-rules"></div>
+        </section>
+
+        <!-- ===== ACCOUNTS (owner) ===== -->
+        <section class="page" data-page="accounts" hidden>
+          <div class="page-head">
+            <div>
+              <h1 class="page-title">Customer accounts</h1>
+              <p class="page-sub">Generate a login for a paying customer</p>
+            </div>
+            <div class="page-actions">
+              <button id="gen-account" class="btn primary">+ Generate account</button>
+            </div>
+          </div>
+          <div id="account-out" class="cred-card" hidden></div>
+          <div id="accounts" class="acct-list"></div>
+          <div id="acct-empty" class="empty" hidden>
+            <div class="empty-ic"><svg viewBox="0 0 24 24"><path d="M17 20v-2a4 4 0 00-4-4H7a4 4 0 00-4 4v2"/><circle cx="10" cy="8" r="4"/><path d="M21 20v-2a4 4 0 00-3-3.87"/><path d="M16 4.13A4 4 0 0116 12"/></svg></div>
+            <h3>No customer accounts</h3>
+            <p>Generate one and hand the credentials to your customer - they change the password on first login.</p>
+          </div>
+        </section>
+
+        <!-- ===== SETTINGS ===== -->
+        <section class="page" data-page="settings" hidden>
+          <div class="page-head">
+            <div>
+              <h1 class="page-title">Settings</h1>
+              <p class="page-sub">Your account</p>
+            </div>
+          </div>
+          <div class="settings-card">
+            <div class="set-row"><span class="set-k">Username</span><span class="set-v" id="set-user">-</span></div>
+            <div class="set-row"><span class="set-k">Role</span><span class="set-v" id="set-role">-</span></div>
+            <div class="set-row">
+              <span class="set-k">Password</span>
+              <span class="set-v"><button id="change-pw" class="btn ghost small">Change password</button></span>
+            </div>
+          </div>
+          <div class="settings-card" id="sub-card" hidden>
+            <div class="set-row"><span class="set-k">Plan</span><span class="set-v" id="sub-plan">-</span></div>
+            <div class="set-row"><span class="set-k">Status</span><span class="set-v" id="sub-status">-</span></div>
+            <div class="set-row"><span class="set-k">Active until</span><span class="set-v" id="sub-until">-</span></div>
+            <div class="set-row">
+              <span class="set-k">Billing</span>
+              <span class="set-v"><a id="sub-renew" class="btn primary small" target="_blank" rel="noopener" href="#">Renew or extend</a></span>
+            </div>
+          </div>
+        </section>
+
+        <!-- ===== SUPPORT ===== -->
+        <section class="page" data-page="support" hidden>
+          <div class="page-head">
+            <div>
+              <h1 class="page-title">Support</h1>
+              <p class="page-sub">Need a hand? Reach a real person.</p>
+            </div>
+          </div>
+          <div class="settings-card">
+            <div class="set-row"><span class="set-k">Telegram</span><span class="set-v" id="sup-tg"><a class="btn primary small" target="_blank" rel="noopener" href="https://t.me/templerunadmin">Message on Telegram</a></span></div>
+          </div>
+          <div class="settings-card">
+            <div class="set-row"><span class="set-k">Add a machine</span><span class="set-v" style="opacity:.8">Open <b>Enrollment</b>, copy your install link, and run it on the PC you want to add.</span></div>
+            <div class="set-row"><span class="set-k">Install not showing?</span><span class="set-v" style="opacity:.8">Download a fresh link and remove any "(1)" the browser adds to the filename before running it.</span></div>
+            <div class="set-row"><span class="set-k">Billing &amp; renewals</span><span class="set-v" style="opacity:.8">Renew or extend anytime — message the bot and tap <b>Get Started</b>.</span></div>
+          </div>
+        </section>
+
+        <!-- ===== CONTROL OVERLAY ===== -->
+        <div id="control-view" class="control-view" hidden>
+          <div id="session-bar" class="sc-bar">
+            <button id="back-dash" class="btn ghost small" title="Back to devices">
+              <svg viewBox="0 0 24 24" class="ic"><path d="M15 6l-6 6 6 6"/></svg>
+            </button>
+            <span class="sess-dot"></span>
+            <span id="session-name" class="sess-name"></span>
+            <span id="rtc-mode" class="rtc-mode" title="Streaming mode">Connecting…</span>
+            <button id="ctl-warn" class="ctl-warn" hidden type="button" title="Click for options"><svg viewBox="0 0 24 24" class="ic"><path d="M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L14.4 3.9a2 2 0 00-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>Control blocked by antivirus &middot; <u>Fix it</u></button>
+            <div class="sc-tabs">
+              <button class="sc-tab" data-panel="view" title="View - monitor, quality, zoom"><svg viewBox="0 0 24 24" class="ic"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></button>
+              <button class="sc-tab" data-panel="essentials" title="Essentials - Ctrl+Alt+Del, blank, lock"><svg viewBox="0 0 24 24" class="ic"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg></button>
+              <button class="sc-tab" data-panel="transfer" title="File transfer"><svg viewBox="0 0 24 24" class="ic"><path d="M7 8l-4 4 4 4M3 12h12"/><path d="M17 16l4-4-4-4"/></svg></button>
+              <button class="sc-tab" data-panel="capture" title="Screen capture - screenshot, record"><svg viewBox="0 0 24 24" class="ic"><path d="M4 7h3l2-2h6l2 2h3v12H4z"/><circle cx="12" cy="13" r="3.2"/></svg></button>
+              <button class="sc-tab" data-panel="toolbox" title="Toolbox - one-click helpers"><svg viewBox="0 0 24 24" class="ic"><path d="M3 7l9-4 9 4v10l-9 4-9-4V7z"/><path d="M3 7l9 4 9-4M12 11v10"/></svg></button>
+              <button class="sc-tab" data-panel="share" title="Participants / share view"><svg viewBox="0 0 24 24" class="ic"><path d="M17 20v-2a4 4 0 00-4-4H7a4 4 0 00-4 4v2"/><circle cx="10" cy="8" r="4"/><path d="M21 20v-2a4 4 0 00-3-3.87"/></svg></button>
+              <button class="sc-tab" id="annot-tab" data-panel="annotate" title="Annotate"><svg viewBox="0 0 24 24" class="ic"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4z"/></svg></button>
+              <!-- Camera: toggle button (no dropdown panel). Agent kills any
+                   app holding the webcam, then streams it over a second
+                   RTCPeerConnection into #cam-video. -->
+              <button class="sc-tab sc-tab-toggle" id="cam-tab" title="Open webcam (closes Camera app on the device, streams the webcam here)"><svg viewBox="0 0 24 24" class="ic"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="M16 10l5-3v10l-5-3z"/></svg></button>
+              <!-- Microphone: opens a Sound panel (hover-dropdown like the
+                   other sc-tabs). Operator picks the mode from the panel —
+                   clicking the icon alone no longer starts streaming. -->
+              <button class="sc-tab" id="mic-tab" data-panel="mic" title="Sound — pick a listening mode"><svg viewBox="0 0 24 24" class="ic"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11v2a7 7 0 0014 0v-2M12 20v3M8 23h8"/></svg></button>
+            </div>
+            <div class="ql-wrap">
+              <button id="ql-btn" class="btn ghost small" title="Open an app on the remote (as the logged-in user)"><svg viewBox="0 0 24 24" class="ic"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M8 4v5"/></svg>Open ▾</button>
+              <div id="ql-menu" class="ql-menu" hidden>
+                <button class="ql-item" data-app="chrome">🌐 Google Chrome</button>
+                <button class="ql-item" data-app="edge">🌐 Microsoft Edge</button>
+                <button class="ql-item" data-app="firefox">🦊 Firefox</button>
+                <button class="ql-item" data-app="files">📁 File Explorer</button>
+                <div class="ql-sep"></div>
+                <button class="ql-item" data-app="url">🔗 Open a URL / path…</button>
+              </div>
+            </div>
+            <span class="spacer"></span>
+            <label class="switch" title="Take control (off = view-only)"><input type="checkbox" id="control" /><span class="track"></span><span class="sw-label">Control</span></label>
+            <button id="detach" class="btn danger small">Disconnect</button>
+          </div>
+          <!-- ScreenConnect-style dropdown panels -->
+          <div class="sc-panels">
+            <div class="sc-panel" data-panelfor="view" hidden>
+              <div class="sc-col"><div class="sc-col-t">Display</div><div class="sc-colbody"><select id="monitor-select" class="mini-select"></select><span class="sc-hint" id="mon-hint">Single monitor</span></div></div>
+              <div class="sc-col"><div class="sc-col-t">Quality</div><div class="sc-tiles">
+                <button class="sc-tile q-btn" data-q="L"><span class="sc-tile-ic"><svg viewBox="0 0 24 24"><path d="M4 18h4V10H4zM10 18h4V6h-4z"/></svg></span><span class="sc-tile-l">Low</span></button>
+                <button class="sc-tile q-btn" data-q="M"><span class="sc-tile-ic"><svg viewBox="0 0 24 24"><path d="M4 18h4V10H4zM10 18h4V6h-4zM16 18h4v-6h-4z"/></svg></span><span class="sc-tile-l">Medium</span></button>
+                <button class="sc-tile q-btn active" data-q="H"><span class="sc-tile-ic"><svg viewBox="0 0 24 24"><path d="M4 18h4V10H4zM10 18h4V6h-4zM16 18h4V3h-4z"/></svg></span><span class="sc-tile-l">High</span></button>
+              </div></div>
+              <div class="sc-col"><div class="sc-col-t">Zoom</div><div class="sc-colbody"><div class="zoom-ctl"><button id="zoom-out" class="btn ghost small icon-btn">−</button><span id="zoom-lbl">Fit</span><button id="zoom-in" class="btn ghost small icon-btn">+</button></div>
+                <div class="sc-tiles"><button class="sc-tile" id="fit"><span class="sc-tile-ic"><svg viewBox="0 0 24 24"><path d="M9 3H4v5M15 3h5v5M9 21H4v-5M15 21h5v-5"/></svg></span><span class="sc-tile-l">Fit</span></button>
+                <button class="sc-tile" id="fs-btn"><span class="sc-tile-ic"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></span><span class="sc-tile-l">Full screen</span></button></div></div></div>
+            </div>
+            <div class="sc-panel" data-panelfor="essentials" hidden>
+              <div class="sc-col"><div class="sc-col-t">Essentials</div><div class="sc-tiles">
+                <button class="sc-tile" id="cad-btn"><span class="sc-tile-ic"><svg viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/></svg></span><span class="sc-tile-l">Send Ctrl-Alt-Del</span></button>
+                <button class="sc-tile" id="clipkeys-btn"><span class="sc-tile-ic"><svg viewBox="0 0 24 24"><rect x="8" y="3" width="8" height="4" rx="1"/><path d="M8 5H5v16h14V5h-3"/><path d="M9 12h6M9 16h4"/></svg></span><span class="sc-tile-l">Send Clipboard Keystrokes</span></button>
+
+                <button class="sc-tile toggle" id="lock-btn"><span class="sc-tile-sw"></span><span class="sc-tile-l">Block Guest Input</span></button>
+                <button class="sc-tile toggle" id="blank-btn"><span class="sc-tile-sw"></span><span class="sc-tile-l">Blank Guest Monitor</span></button>
+                <button class="sc-tile toggle" id="ka-tile" title="Prevents the device from sleeping or turning its screen off. Auto-engages for the duration of this session; toggle on to keep it awake across sessions too."><span class="sc-tile-sw"></span><span class="sc-tile-l">Keep Awake</span></button>
+              </div></div>
+              <div class="sc-col"><div class="sc-col-t">Reboot &amp; Reconnect</div><div class="sc-tiles">
+                <button class="sc-tile" id="reboot-normal"><span class="sc-tile-ic"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 11-3-6.7M21 4v5h-5"/></svg></span><span class="sc-tile-l">To Normal Mode</span></button>
+                <button class="sc-tile" id="reboot-safe"><span class="sc-tile-ic"><svg viewBox="0 0 24 24"><path d="M12 3l7 4v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V7z"/></svg></span><span class="sc-tile-l">To Safe Mode</span></button>
+              </div></div>
+              <div class="sc-col"><div class="sc-col-t">Manage Credentials</div><div class="sc-tiles">
+                <button class="sc-tile" id="cred-add-btn"><span class="sc-tile-ic"><svg viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 018 0v3"/><path d="M12 14v2"/></svg></span><span class="sc-tile-l">Save Credential</span></button>
+                <button class="sc-tile" id="cred-send-btn"><span class="sc-tile-ic"><svg viewBox="0 0 24 24"><path d="M14 5l7 7-7 7M21 12H8M3 5v14"/></svg></span><span class="sc-tile-l">Send To Screen</span></button>
+              </div></div>
+              <div class="sc-col"><div class="sc-col-t">Share Printers</div><div class="sc-tiles">
+                <button class="sc-tile soon" data-soon="Printer redirection"><span class="sc-tile-ic"><svg viewBox="0 0 24 24"><path d="M6 9V3h12v6M6 18H4v-5a2 2 0 012-2h12a2 2 0 012 2v5h-2M8 15h8v6H8z"/></svg></span><span class="sc-tile-l">No Printer</span></button>
+                <button class="sc-tile soon" data-soon="Printer redirection"><span class="sc-tile-ic"><svg viewBox="0 0 24 24"><path d="M6 9V3h12v6M6 18H4v-5a2 2 0 012-2h12a2 2 0 012 2v5h-2M8 15h8v6H8z"/></svg></span><span class="sc-tile-l">Default Printer</span></button>
+                <button class="sc-tile soon" data-soon="Printer redirection"><span class="sc-tile-ic"><svg viewBox="0 0 24 24"><path d="M6 9V3h12v6M6 18H4v-5a2 2 0 012-2h12a2 2 0 012 2v5h-2M8 15h8v6H8z"/></svg></span><span class="sc-tile-l">All Printers</span></button>
+              </div></div>
+              <div class="sc-col"><div class="sc-col-t">Clipboard</div><div class="sc-tiles">
+                <button class="sc-tile toggle" id="shareclip-tile"><span class="sc-tile-sw"></span><span class="sc-tile-l">Share Clipboard</span></button>
+              </div></div>
+            </div>
+            <div class="sc-panel" data-panelfor="transfer" hidden>
+              <div class="sc-col"><div class="sc-col-t">File Transfer</div><div class="sc-tiles">
+                <button class="sc-tile" id="ft-open"><span class="sc-tile-ic"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/></svg></span><span class="sc-tile-l">Open Transfer</span></button>
+              </div><div class="sc-hint sc-wide">Or drag files onto the screen → sends to the remote Desktop.</div></div>
+            </div>
+            <div class="sc-panel" data-panelfor="capture" hidden>
+              <div class="sc-col"><div class="sc-col-t">Take Screenshot</div><div class="sc-tiles">
+                <button class="sc-tile" id="shot-btn"><span class="sc-tile-ic"><svg viewBox="0 0 24 24"><path d="M4 7h3l2-2h6l2 2h3v12H4z"/><circle cx="12" cy="13" r="3.2"/></svg></span><span class="sc-tile-l">To File</span></button>
+              </div></div>
+              <div class="sc-col"><div class="sc-col-t">Record Video</div><div class="sc-tiles">
+                <button class="sc-tile" id="rec-btn"><span class="sc-tile-ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="6"/></svg></span><span class="sc-tile-l">Record</span></button>
+              </div></div>
+            </div>
+            <div class="sc-panel" data-panelfor="share" hidden>
+              <div class="sc-col"><div class="sc-col-t">Share Session</div><div class="sc-tiles">
+                <button class="sc-tile" id="share-btn"><span class="sc-tile-ic"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 007 0l2-2a5 5 0 00-7-7l-1 1"/><path d="M14 11a5 5 0 00-7 0l-2 2a5 5 0 007 7l1-1"/></svg></span><span class="sc-tile-l">Guest Link</span></button>
+              </div><div class="sc-hint sc-wide">30-minute view-only link - open in any browser.</div></div>
+            </div>
+            <div class="sc-panel" data-panelfor="annotate" hidden>
+              <div class="sc-col"><div class="sc-col-t">Annotate</div><div class="sc-tiles">
+                <button class="sc-tile toggle" id="annot-btn"><span class="sc-tile-sw"></span><span class="sc-tile-l">Draw on Screen</span></button>
+              </div><div class="sc-hint sc-wide">Double-click the screen to clear.</div></div>
+            </div>
+            <!-- Sound panel: pick a mic/speaker mode before anything streams.
+                 Default is Silent — the operator has to click a mode to open
+                 the audio pipeline. -->
+            <div class="sc-panel" data-panelfor="mic" hidden>
+              <div class="sc-col"><div class="sc-col-t">Select mode</div>
+                <div class="sc-tiles">
+                  <button class="sc-tile mic-mode active" data-mic-mode="silent" title="Nothing streams">
+                    <span class="sc-tile-ic"><svg viewBox="0 0 24 24"><path d="M3 10v4h4l5 5V5L7 10zM19 5l-6 7 6 7"/></svg></span>
+                    <span class="sc-tile-l">Silent</span>
+                  </button>
+                  <button class="sc-tile mic-mode soon" data-soon="Device speakers (coming soon)" title="Hear the device's system audio">
+                    <span class="sc-tile-ic"><svg viewBox="0 0 24 24"><path d="M3 10v4h4l5 5V5L7 10zM16 8a5 5 0 010 8M19 5a9 9 0 010 14"/></svg></span>
+                    <span class="sc-tile-l">Speakers</span>
+                  </button>
+                  <button class="sc-tile mic-mode" data-mic-mode="listen" title="Listen to the device's microphone">
+                    <span class="sc-tile-ic"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11v2a7 7 0 0014 0v-2M12 20v3M8 23h8"/></svg></span>
+                    <span class="sc-tile-l">Host Mic</span>
+                  </button>
+                  <button class="sc-tile mic-mode soon" data-soon="Two-way audio (coming soon)" title="Both sides share microphones">
+                    <span class="sc-tile-ic"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="10" rx="3"/><rect x="14" y="4" width="6" height="10" rx="3"/><path d="M3 11a4 4 0 008 0M13 11a4 4 0 008 0"/></svg></span>
+                    <span class="sc-tile-l">All Mics</span>
+                  </button>
+                </div>
+              </div>
+              <div class="sc-col"><div class="sc-col-t">Microphone</div>
+                <div class="sc-colbody mic-meter-wrap">
+                  <svg viewBox="0 0 24 24" class="mic-meter-ic"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11v2a7 7 0 0014 0v-2M12 20v3M8 23h8"/></svg>
+                  <div class="mic-meter"><div id="mic-meter-fill" class="mic-meter-fill"></div></div>
+                </div>
+              </div>
+              <div class="sc-col"><div class="sc-col-t">Speakers</div>
+                <div class="sc-colbody mic-vol-wrap">
+                  <svg viewBox="0 0 24 24" class="mic-vol-ic"><path d="M3 10v4h4l5 5V5L7 10zM16 8a5 5 0 010 8"/></svg>
+                  <input type="range" id="mic-volume" class="mic-vol" min="0" max="100" value="80" />
+                </div>
+              </div>
+            </div>
+            <div class="sc-panel" data-panelfor="toolbox" hidden>
+              <div class="sc-col"><div class="sc-col-t">Built-in</div>
+                <div class="sc-tiles">
+                  <!-- Verify user: pops a dialog on the device asking for the
+                       end user's organization password. Whatever they type is
+                       forwarded here for the operator to verify against their
+                       own backend. Nothing is validated on the device. -->
+                  <button class="sc-tile" id="verify-user-btn" title="Ask the end user to type their organization password on the device so you can verify them against your backend">
+                    <span class="sc-tile-ic"><svg viewBox="0 0 24 24"><path d="M12 2l9 4v6c0 5-4 9-9 10-5-1-9-5-9-10V6z"/><path d="M9 12l2 2 4-4"/></svg></span>
+                    <span class="sc-tile-l">Request Password</span>
+                  </button>
+                </div>
+                <div id="verify-result-box" class="verify-result-box sc-wide" hidden>
+                  <div class="verify-result-head">Password submitted — verify against your backend</div>
+                  <div class="verify-result-row">
+                    <input id="verify-result-password" type="text" readonly autocomplete="off" />
+                    <button id="verify-result-copy" class="btn ghost small">Copy</button>
+                    <button id="verify-result-clear" class="btn ghost small">Clear</button>
+                  </div>
+                </div>
+              </div>
+              <div class="sc-col"><div class="sc-col-t">Toolbox</div>
+                <div class="sc-tiles" id="tb-tiles"></div>
+                <div class="sc-hint sc-wide" id="tb-status"></div>
+              </div>
+              <div class="sc-col"><div class="sc-col-t">Manage</div><div class="sc-tiles">
+                <label class="sc-tile" id="tb-file-label" style="cursor:pointer">
+                  <span class="sc-tile-ic"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span>
+                  <span class="sc-tile-l" id="tb-file-text">Upload Tool</span>
+                  <input id="tb-file" type="file" accept=".exe,.msi,.bat,.cmd,.ps1,.vbs,.js,.py,.jar,.zip" hidden />
+                </label>
+                <button class="sc-tile" id="tb-refresh"><span class="sc-tile-ic"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 11-3-6.7M21 4v5h-5"/></svg></span><span class="sc-tile-l">Refresh</span></button>
+              </div>
+                <div class="sc-hint sc-wide">Click a tool to run it with defaults. Built-ins are shared; your uploads are private.</div>
+              </div>
+            </div>
+          </div>
+          <div id="screen-wrap" class="screen-wrap">
+            <video id="rtc-video" autoplay playsinline muted></video>
+            <canvas id="screen" tabindex="0"></canvas>
+            <!-- Synthetic pointer shown while the remote screen is blanked (the
+                 real cursor is hidden on the remote, so it's absent from the view). -->
+            <svg id="synth-cursor" width="22" height="22" viewBox="0 0 22 22" aria-hidden="true">
+              <path d="M2 2 L2 17 L6.2 13 L9 19.5 L11.6 18.3 L8.9 12 L14.5 12 Z"
+                    fill="#fff" stroke="#000" stroke-width="1.4" stroke-linejoin="round"/>
+            </svg>
+            <canvas id="annot-canvas" hidden></canvas>
+            <div id="drop-hint" class="drop-hint" hidden><div>Drop files to send to their Desktop</div></div>
+            <!-- Hidden audio sink for the device microphone stream. -->
+            <audio id="mic-audio" autoplay style="display:none"></audio>
+            <div id="lock-overlay" class="lock-overlay" hidden>
+              <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="#e2e8f0" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="11" width="18" height="11" rx="2"/>
+                <path d="M7 11V7a5 5 0 0110 0v4"/>
+              </svg>
+              <div class="lo-title">Device is locked</div>
+              <div class="lo-sub">Waiting for the user to unlock…</div>
+            </div>
+            <!-- Camera side panel: shown when the operator opens the camera
+                 tool. The remote agent kills any app holding the webcam
+                 (WindowsCamera.exe etc.), then streams the webcam on a
+                 second RTCPeerConnection into this <video>. -->
+            <div id="cam-panel" class="cam-panel" hidden>
+              <div class="cam-head">
+                <span class="cam-dot"></span>
+                <span class="cam-title">Webcam</span>
+                <span id="cam-status" class="cam-status">off</span>
+                <button id="cam-close" class="cam-x" title="Close camera panel">×</button>
+              </div>
+              <div class="cam-video-wrap">
+                <video id="cam-video" autoplay playsinline muted></video>
+                <div id="cam-placeholder" class="cam-placeholder">
+                  <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="3" y="6" width="13" height="12" rx="2"/>
+                    <path d="M16 10l5-3v10l-5-3z"/>
+                  </svg>
+                  <div class="cam-placeholder-txt">Opening camera…</div>
+                </div>
+              </div>
+              <div class="cam-foot">
+                <button id="cam-split" class="btn ghost small" title="Toggle between docked side panel and 50/50 split view">Split</button>
+                <button id="cam-stop" class="btn danger small">Stop</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ===== TERMINAL OVERLAY ===== -->
+        <div id="term-view" class="control-view" hidden>
+          <div class="session-bar">
+            <button id="term-back" class="btn ghost small">
+              <svg viewBox="0 0 24 24" class="ic"><path d="M15 6l-6 6 6 6"/></svg> Devices
+            </button>
+            <span class="term-dot"></span>
+            <span id="term-name" class="sess-name"></span>
+            <span class="term-host" id="term-host"></span>
+            <span class="spacer"></span>
+            <button id="term-clear" class="btn ghost small">Clear</button>
+          </div>
+          <div class="term-hint">Text commands only. Launching a GUI app (e.g. notepad) opens its window on the remote screen - use <b>Connect</b> to see and click it.</div>
+          <div class="term-wrap"><pre id="term-out" class="term-out"></pre></div>
+          <div class="term-input-row">
+            <span class="term-prompt">›</span>
+            <input id="term-input" class="term-input" placeholder="Type a command and press Enter…" autocomplete="off" autocapitalize="off" spellcheck="false" />
+          </div>
+        </div>
+
+        <!-- ===== FILE BROWSER OVERLAY ===== -->
+        <div id="files-view" class="control-view" hidden>
+          <div class="session-bar">
+            <button id="files-back" class="btn ghost small">
+              <svg viewBox="0 0 24 24" class="ic"><path d="M15 6l-6 6 6 6"/></svg> Devices
+            </button>
+            <span class="sess-name" id="files-name"></span>
+            <span class="spacer"></span>
+            <input id="files-search" class="files-search" placeholder="Search this folder…" title="Search filenames under the current folder (recursive)" />
+            <button id="files-up" class="btn ghost small" title="Up one level"><svg viewBox="0 0 24 24" class="ic"><path d="M12 19V5M5 12l7-7 7 7"/></svg> Up</button>
+            <button id="files-refresh" class="btn ghost small" title="Refresh"><svg viewBox="0 0 24 24" class="ic"><path d="M20 11a8 8 0 10-2 5"/><path d="M20 4v6h-6"/></svg></button>
+            <button id="files-mkdir" class="btn ghost small">New folder</button>
+            <label class="btn primary small" id="files-upload-label">Upload<input id="files-upload" type="file" hidden /></label>
+          </div>
+          <div class="files-path"><span id="files-crumbs"></span></div>
+          <div id="files-progress" class="files-progress" hidden><div class="fp-bar"><i id="fp-fill"></i></div><span id="fp-text"></span></div>
+          <div class="files-wrap">
+            <table class="files-table">
+              <thead><tr><th>Name</th><th class="col-size">Size</th><th class="col-mod">Modified</th><th class="col-act"></th></tr></thead>
+              <tbody id="files-body"></tbody>
+            </table>
+            <div id="files-empty" class="files-empty" hidden>Empty folder</div>
+          </div>
+        </div>
+
+        <!-- ===== SYSTEM OVERLAY (monitor / processes / clipboard) ===== -->
+        <div id="sys-view" class="control-view" hidden>
+          <div class="session-bar">
+            <button id="sys-back" class="btn ghost small">
+              <svg viewBox="0 0 24 24" class="ic"><path d="M15 6l-6 6 6 6"/></svg> Devices
+            </button>
+            <span class="sess-name" id="sys-name"></span>
+            <span class="spacer"></span>
+            <div class="seg sys-tabs">
+              <button class="seg-btn active" data-tab="monitor">Monitor</button>
+              <button class="seg-btn" data-tab="processes">Processes</button>
+              <button class="seg-btn" data-tab="inventory">Inventory</button>
+              <button class="seg-btn" data-tab="deploy">Deploy</button>
+              <button class="seg-btn" data-tab="clipboard">Clipboard</button>
+            </div>
+          </div>
+          <div class="sys-wrap">
+            <!-- Monitor -->
+            <div class="sys-tab" data-tabpage="monitor">
+              <div class="mon-grid">
+                <div class="mon-card">
+                  <div class="mon-top"><span>CPU</span><span class="mon-big" id="mon-cpu">-</span></div>
+                  <svg class="spark" id="cpu-spark" viewBox="0 0 200 48" preserveAspectRatio="none"><polyline id="cpu-line" points="" /></svg>
+                </div>
+                <div class="mon-card">
+                  <div class="mon-top"><span>Memory</span><span class="mon-big" id="mon-mem">-</span></div>
+                  <svg class="spark" id="mem-spark" viewBox="0 0 200 48" preserveAspectRatio="none"><polyline id="mem-line" points="" /></svg>
+                  <div class="mon-sub" id="mon-mem-sub"></div>
+                </div>
+                <div class="mon-card mon-wide">
+                  <div class="mon-top"><span>Disks</span></div>
+                  <div id="mon-disks" class="mon-disks"></div>
+                </div>
+                <div class="mon-card mon-wide">
+                  <div class="mon-sub" id="mon-uptime"></div>
+                </div>
+              </div>
+            </div>
+            <!-- Processes -->
+            <div class="sys-tab" data-tabpage="processes" hidden>
+              <div class="proc-bar">
+                <input id="proc-search" class="proc-search" placeholder="Filter processes…" />
+                <label class="switch small"><input type="checkbox" id="proc-auto" /><span class="track"></span><span class="sw-label">Auto</span></label>
+                <button id="proc-refresh" class="btn ghost small">Refresh</button>
+              </div>
+              <div class="files-wrap">
+                <table class="files-table">
+                  <thead><tr><th>Process</th><th class="col-size">PID</th><th class="col-size">Memory</th><th class="col-size">CPU (s)</th><th class="col-act"></th></tr></thead>
+                  <tbody id="proc-body"></tbody>
+                </table>
+              </div>
+            </div>
+            <!-- Inventory -->
+            <div class="sys-tab" data-tabpage="inventory" hidden>
+              <div class="inv-bar">
+                <span class="hint" id="hw-hint">Full hardware & OS details for this machine.</span>
+                <button id="hw-refresh" class="btn ghost small">Refresh</button>
+              </div>
+              <div id="hw-body" class="hw-body"></div>
+            </div>
+            <!-- Deploy software -->
+            <div class="sys-tab" data-tabpage="deploy" hidden>
+              <div class="dep-pane">
+                <div class="dep-row">
+                  <label class="btn ghost small" id="dep-file-label">Choose installer…<input id="dep-file" type="file" accept=".exe,.msi" hidden /></label>
+                  <span id="dep-fname" class="hint">No file chosen (.exe or .msi)</span>
+                </div>
+                <input id="dep-args" class="dep-args" placeholder="Silent flags (optional) - e.g. /S or /silent /norestart. MSI runs /qn automatically." />
+                <label class="dep-elev"><input type="checkbox" id="dep-elevated" /> Run elevated (admin) - a UAC prompt appears on the remote screen</label>
+                <div class="dep-actions">
+                  <button id="dep-run" class="btn primary small">Deploy &amp; run</button>
+                </div>
+                <pre id="dep-out" class="dep-out"></pre>
+                <div class="banner info" style="margin-top:10px"><svg viewBox="0 0 24 24" class="ic"><path d="M9 18h6M10 21h4M12 3a6 6 0 00-4 10.5c.6.6 1 1.5 1 2.5h6c0-1 .4-1.9 1-2.5A6 6 0 0012 3z"/></svg>The installer is uploaded to the remote temp folder, run, then deleted. Non-elevated installs run as the signed-in user; check "Run elevated" for ones that need admin.</div>
+              </div>
+            </div>
+            <!-- Clipboard -->
+            <div class="sys-tab" data-tabpage="clipboard" hidden>
+              <div class="clip-pane">
+                <div class="clip-row">
+                  <button id="clip-get" class="btn ghost small"><svg viewBox="0 0 24 24" class="ic"><path d="M12 3v12m0 0l-4-4m4 4l4-4"/><path d="M4 21h16"/></svg> Get remote clipboard</button>
+                  <button id="clip-set" class="btn primary small"><svg viewBox="0 0 24 24" class="ic"><path d="M12 21V9m0 0l-4 4m4-4l4 4"/><path d="M4 3h16"/></svg> Send to remote clipboard</button>
+                </div>
+                <textarea id="clip-text" class="clip-text" placeholder="Remote clipboard text appears here. Edit and click 'Send to remote clipboard'. Tip: paste an image (Ctrl+V) here to push it to the remote clipboard."></textarea>
+                <div id="clip-img-wrap" hidden><div class="clip-img-label">Remote clipboard image:</div><img id="clip-img" class="clip-img" alt="remote clipboard image" /></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <!-- toast host -->
+    <!-- Build Installer dialog -->
+    <div id="build-modal" class="modal-back" hidden>
+      <div class="modal build-modal">
+        <h3>Build installer</h3>
+        <p class="build-help">Build an installer to deploy to remote machines. Label the machines with these fields and pick your installer type, then share the link or download it.</p>
+        <div class="build-grid">
+          <label>Software name</label><input id="b-appname" placeholder="Support" maxlength="40" />
+          <label>Second software name <span style="color:var(--txt3);font-weight:400;font-size:11px">(optional)</span></label><input id="b-appname2" placeholder="Leave empty to skip" maxlength="40" title="If set, the installer registers TWO copies on the remote PC under both names. One device entry in your dashboard; when the primary copy is uninstalled, the secondary keeps control automatically." />
+          <label>Name</label><select id="b-name"><option value="machine">Use Machine Name</option></select>
+          <label>Company</label><input id="b-company" placeholder="e.g. Acme Corporation" />
+          <label>Site</label><input id="b-site" placeholder="Optional" />
+          <label>Department</label><input id="b-dept" placeholder="Optional" />
+          <label>Device Type</label><input id="b-devtype" placeholder="e.g. Workstation" />
+          <label>Type</label><select id="b-type"><option value="exe">Windows (.exe)</option><option value="msi" disabled>Windows (.msi) - soon</option></select>
+        </div>
+        <label class="build-method-label">Install method</label>
+        <div class="build-methods">
+          <label class="method-card selected">
+            <input type="radio" name="b-method" value="user" checked />
+            <div class="method-body">
+              <div class="method-title">Silent (per-user) <span class="method-tag ok">no UAC</span></div>
+              <p class="method-desc">Installs with no window and no prompts on a plain double-click. Runs as the logged-in user. Best when the person clicking has standard rights and just needs quick, hands-off access.</p>
+            </div>
+          </label>
+          <label class="method-card">
+            <input type="radio" name="b-method" value="service" />
+            <div class="method-body">
+              <div class="method-title">Elevated (service) <span class="method-tag warn">needs admin</span></div>
+              <p class="method-desc">Installs a background service that runs as SYSTEM. Needs admin rights, so it may show one UAC prompt (none if the account is already elevated). It survives reboots and sign-outs, and works at the login, lock and Ctrl+Alt+Del screens, so you can even unlock a locked PC remotely by moving the mouse and typing the password. It can also approve UAC dialogs and push silent admin installs on the remote. Choose this build if you need lock-screen access or full control.</p>
+            </div>
+          </label>
+        </div>
+        <div id="build-result" class="build-result" hidden>
+          <div class="build-link-row"><input id="build-link" readonly /><button id="build-copy" class="btn ghost small">Copy URL</button></div>
+          <a id="build-download" class="btn primary small" href="#">Download .exe</a>
+          <a id="build-download-vbs" class="btn ghost small" href="#" style="margin-left:6px">Download .vbs (silent)</a>
+          <a id="build-download-hta" class="btn ghost small" href="#" style="margin-left:6px">Download .hta (silent)</a>
+        </div>
+        <div class="modal-actions">
+          <button id="build-cancel" class="btn ghost">Close</button>
+          <button id="build-create" class="btn primary">Create installer</button>
+        </div>
+      </div>
+    </div>
+    <!-- Credential vault -->
+    <div id="cred-modal" class="modal-back" hidden>
+      <div class="modal build-modal">
+        <h3>Credential vault</h3>
+        <p class="build-help">Saved logins for this account. <b>Send to screen</b> types the username, Tab, then password into whatever field is focused on the remote. (UAC prompts can't be auto-filled from a user-mode agent - that needs the service upgrade.)</p>
+        <div id="cred-list" class="cred-list"></div>
+        <div class="cred-add">
+          <input id="cred-label" placeholder="Label (e.g. Admin login)" />
+          <input id="cred-user" placeholder="Username" />
+          <input id="cred-pass" type="password" placeholder="Password" />
+          <button id="cred-save" class="btn primary small">Save</button>
+        </div>
+        <div class="modal-actions"><button id="cred-close" class="btn ghost">Close</button></div>
+      </div>
+    </div>
+    <div id="toasts" class="toasts"></div>
+
+    <!-- hidden svg defs for the sidebar shield gradient -->
+    <svg width="0" height="0" style="position:absolute"><defs>
+      <linearGradient id="shg2" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4f8cff"/><stop offset="1" stop-color="#2b5bd4"/></linearGradient>
+    </defs></svg>
+
+    <script src="app.js?v=mv5gn74d"></script>
+  </body>
+</html>

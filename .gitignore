@@ -1,0 +1,5 @@
+﻿node_modules/
+dist/
+templeconnect-desktop/node_modules/
+templeconnect-desktop/dist/
+TempleConnect-Setup.exe

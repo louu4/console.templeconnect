@@ -1,0 +1,21 @@
+{
+  "name": "templeconnect",
+  "version": "1.0.0",
+  "description": "TempleConnect remote support console",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^4.18.2",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "electron": "^44.8.0",
+    "pkg": "^5.8.1"
+  }
+}
