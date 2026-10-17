@@ -1,0 +1,3339 @@
+'use strict';
+
+// --- Deep-link token handler ---
+const handoffToken = new URLSearchParams(window.location.search).get('token');
+if (handoffToken) {
+  try {
+    localStorage.setItem('authToken', handoffToken);
+  } catch (e) {}
+}
+
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+// v2 overlay flag: true when app.v2.css is currently loaded (toggled by the
+// inline bootstrap in app.html via ?legacy=1 / localStorage.hcTheme). Gates
+// the mockup-faithful DOM enhancements below. Legacy = false, no risk, same
+// DOM as before.
+const HC_V2 = (function () { try { return !!document.getElementById('hc-v2-css'); } catch (e) { return false; } })();
+// v2 chrome injection — one-shot, runs on DOMContentLoaded. Adds the mockup
+// bits that need HTML (not just CSS): a column-header strip above the device
+// list. Legacy mode skips this entirely.
+// v2 chrome: injects the mockup's structural bits that need HTML (not just
+// CSS) — topbar with breadcrumbs/search/user pill, rail org picker + section
+// labels + nav badges + "Relay healthy" footer, page-head CTAs, metric strip
+// sparklines + delta captions, right-aligned filter+sort controls, 8-column
+// device row + header, and a table footer. All one-shot on DOMContentLoaded,
+// then window.hcV2Refresh() is called from renderDevices to keep counts live.
+// Everything is gated by HC_V2 and does nothing on ?legacy=1.
+if (HC_V2) {
+  // Static sparkline paths — purely cosmetic (we don't have real history).
+  var V2_SPARK = {
+    up:   'M0 18 L10 16 L20 17 L28 14 L36 12 L46 13 L54 8 L64 10 L70 6',
+    flat: 'M0 10 L10 12 L20 8 L30 11 L40 9 L50 12 L60 10 L70 8',
+    rise: 'M0 20 L10 16 L20 18 L30 13 L40 15 L50 10 L60 8 L70 5',
+    dot:  'M0 10 L70 10',
+  };
+  // Derive a one-word role tag from the hostname so the Tags column has
+  // something visible until real tags are wired. Exposed on window so the
+  // updater (which runs outside this block scope under 'use strict') can
+  // reach it; strict mode would otherwise keep this function block-scoped.
+  window.v2Tag = function (d) {
+    var n = (d.name || '').toUpperCase();
+    if (n.indexOf('LAPTOP') === 0) return 'laptop';
+    if (n.indexOf('DESKTOP') === 0) return 'workstation';
+    if (n.indexOf('SRV') === 0 || n.indexOf('SERVER') === 0) return 'server';
+    return 'device';
+  };
+  document.addEventListener('DOMContentLoaded', function v2Mount() {
+    try {
+      // ---- Topbar: crumbs + wide search + icons + user pill ----
+      var main = document.querySelector('.main');
+      if (main && !main.querySelector('.v2-topbar')) {
+        var top = document.createElement('div');
+        top.className = 'v2-topbar';
+        top.innerHTML =
+          '<div class="v2-crumbs"><span class="v2-crumb-org">—</span>' +
+          '<span class="v2-sep">/</span>' +
+          '<span class="here" id="v2-crumb-here">Devices</span></div>' +
+          '<div class="v2-top-search"><svg viewBox="0 0 24 24" class="ic"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg>' +
+          '<input id="v2-top-search-input" placeholder="Search hostname, IP, tag, operator…" />' +
+          '<span class="v2-kbd">⌘K</span></div>' +
+          '<div class="v2-top-actions">' +
+          '<button class="v2-icon-btn" title="Notifications"><svg viewBox="0 0 24 24" class="ic"><path d="M18 16v-5a6 6 0 10-12 0v5l-2 3h16z"/><path d="M10 20a2 2 0 004 0"/></svg></button>' +
+          '<button class="v2-icon-btn" title="Help"><svg viewBox="0 0 24 24" class="ic"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 115 .3c0 1.5-2.5 2-2.5 3.7M12 17h.01"/></svg></button>' +
+          '<button class="v2-user-pill" id="v2-user-pill"><span class="v2-user-av">—</span><span class="v2-user-name">—</span></button>' +
+          '</div>';
+        main.insertBefore(top, main.firstChild);
+        // Mirror typing into the real search input the app already wires.
+        var realSearch = document.getElementById('dev-search');
+        var topInput = document.getElementById('v2-top-search-input');
+        if (realSearch && topInput) {
+          topInput.addEventListener('input', function () {
+            realSearch.value = topInput.value;
+            realSearch.dispatchEvent(new Event('input', { bubbles: true }));
+          });
+          document.addEventListener('keydown', function (e) {
+            if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); topInput.focus(); }
+          });
+        }
+      }
+
+      // ---- Rail: org picker, section labels, nav badges, relay footer ----
+      var sidebar = document.querySelector('.sidebar');
+      var sideNav = document.querySelector('.side-nav');
+      if (sidebar && sideNav && !sidebar.querySelector('.v2-org')) {
+        var org = document.createElement('div');
+        org.className = 'v2-org';
+        org.innerHTML =
+          '<div class="v2-org-av">—</div>' +
+          '<div class="v2-org-meta"><div class="v2-org-name">—</div>' +
+          '<div class="v2-org-role">Owner</div></div>' +
+          '<div class="v2-org-caret">▾</div>';
+        sidebar.insertBefore(org, sideNav);
+        // "WORKSPACE" at top of nav; "ACCOUNT" before Settings
+        var ws = document.createElement('div'); ws.className = 'v2-sect'; ws.textContent = 'Workspace';
+        sideNav.insertBefore(ws, sideNav.firstChild);
+        // Account section opens at Accounts (customer management, owner-only)
+        // and falls back to Settings so the heading appears even when the
+        // operator isn't an owner and the Accounts item is hidden.
+        var accountsBtn = sideNav.querySelector('[data-view="accounts"]');
+        var settingsBtn = sideNav.querySelector('[data-view="settings"]');
+        var accountAnchor = accountsBtn || settingsBtn;
+        if (accountAnchor) {
+          var acc = document.createElement('div'); acc.className = 'v2-sect'; acc.textContent = 'Account';
+          sideNav.insertBefore(acc, accountAnchor);
+        }
+        // Count badges on nav items; filled by hcV2Refresh.
+        for (var _n of sideNav.querySelectorAll('.nav-item')) {
+          var b = document.createElement('span'); b.className = 'v2-badge';
+          _n.appendChild(b);
+        }
+        // Relay healthy footer (replaces nothing; appended to sidebar).
+        var relay = document.createElement('div');
+        relay.className = 'v2-relay';
+        relay.innerHTML = '<span class="v2-relay-dot"></span><div class="v2-relay-txt"><div>Relay healthy</div><div class="v2-relay-lat">lat …</div></div>';
+        sidebar.appendChild(relay);
+      }
+
+      // ---- Devices page-head CTAs ----
+      var devPage = document.querySelector('.page[data-page="devices"]');
+      var devHead = devPage && devPage.querySelector('.page-actions');
+      if (devHead && !devHead.querySelector('.v2-cta-build')) {
+        var build = document.createElement('button');
+        build.className = 'btn ghost v2-cta-build';
+        build.innerHTML = '<svg viewBox="0 0 24 24" class="ic"><path d="M4 17V7h16v10zM4 12h16"/></svg>Build installer';
+        build.addEventListener('click', function () { if (typeof goto === 'function') goto('enrollment'); });
+        devHead.insertBefore(build, devHead.firstChild);
+        var add = document.createElement('button');
+        add.className = 'btn primary v2-cta-add';
+        add.innerHTML = '<svg viewBox="0 0 24 24" class="ic"><path d="M12 5v14M5 12h14"/></svg>Add device<span class="v2-kbd">N</span>';
+        add.addEventListener('click', function () { if (typeof goto === 'function') goto('enrollment'); });
+        devHead.appendChild(add);
+      }
+
+      // ---- Metric strip: inject sparkline + delta into each stat ----
+      var stats = document.getElementById('stats');
+      if (stats && !stats.querySelector('.v2-spark')) {
+        var statSpecs = {
+          'st-total':       { label: 'Enrolled',    path: V2_SPARK.up,   deltaCls: 'up',   delta: '' },
+          'st-online':      { label: 'Online',      path: V2_SPARK.flat, deltaCls: '',     delta: '' },
+          'st-uninstalled': { label: 'Uninstalled', path: V2_SPARK.dot,  deltaCls: 'down', delta: '' },
+          'st-offline':     { label: 'Offline',     path: V2_SPARK.dot,  deltaCls: 'down', delta: '' },
+          'st-busy':        null,
+          'st-sleep':       null,
+        };
+        for (var id in statSpecs) {
+          var tile = document.getElementById(id);
+          if (!tile) continue;
+          var card = tile.closest('.stat');
+          if (!card) continue;
+          var spec = statSpecs[id];
+          if (!spec) { card.classList.add('v2-hide'); continue; }
+          var lbl = card.querySelector('.stat-label');
+          if (lbl) lbl.textContent = spec.label;
+          var delta = document.createElement('div');
+          delta.className = 'v2-delta ' + spec.deltaCls;
+          card.appendChild(delta);
+          var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+          svg.setAttribute('class', 'v2-spark');
+          svg.setAttribute('viewBox', '0 0 70 24');
+          svg.setAttribute('fill', 'none');
+          svg.setAttribute('stroke', 'currentColor');
+          svg.setAttribute('stroke-width', '1.4');
+          svg.innerHTML = '<path d="' + spec.path + '"/>';
+          card.appendChild(svg);
+        }
+      }
+
+      // ---- Filter chip: insert "In session" (matches mockup order) ----
+      var filterRow = document.getElementById('dev-filter');
+      if (filterRow && !filterRow.querySelector('[data-f="busy"]')) {
+        var sleepBtn = filterRow.querySelector('[data-f="sleep"]');
+        if (sleepBtn) {
+          var busyBtn = document.createElement('button');
+          busyBtn.className = 'seg-btn';
+          busyBtn.dataset.f = 'busy';
+          busyBtn.textContent = 'In session';
+          busyBtn.addEventListener('click', function () {
+            filterRow.querySelectorAll('.seg-btn').forEach(function (x) { x.classList.remove('active'); });
+            busyBtn.classList.add('active');
+            // `filter` is the script-top let that drives renderDevices; this
+            // closure captures it from the enclosing script scope.
+            filter = 'busy';
+            renderDevices();
+          });
+          filterRow.insertBefore(busyBtn, sleepBtn);
+        }
+      }
+
+      // ---- Filter row: right-aligned Filter + Sort controls ----
+      if (filterRow && !filterRow.querySelector('.v2-filter-right')) {
+        var right = document.createElement('div');
+        right.className = 'v2-filter-right';
+        right.innerHTML =
+          '<button class="v2-sel"><svg viewBox="0 0 24 24" class="ic"><path d="M4 6h16M7 12h10M10 18h4"/></svg>Filter</button>' +
+          '<button class="v2-sel">Sort: Last seen <span class="v2-caret">▾</span></button>';
+        filterRow.appendChild(right);
+      }
+
+      // ---- Table header strip (8-col grid) ----
+      var box = document.getElementById('devices');
+      if (box && !document.querySelector('.v2-list-head')) {
+        var head = document.createElement('div');
+        head.className = 'v2-list-head';
+        head.innerHTML =
+          '<span></span>' +            // col 1: OS icon
+          '<span>Device</span>' +      // col 2
+          '<span>Status</span>' +      // col 3
+          '<span>Tags</span>' +        // col 4
+          '<span>Signed-in</span>' +   // col 5
+          '<span>Agent</span>' +       // col 6
+          '<span>Last seen</span>' +   // col 7
+          '<span style="text-align:right">Actions</span>'; // col 8
+        box.parentNode.insertBefore(head, box);
+      }
+
+      // ---- Table footer: Showing · Updated · Tip ----
+      if (box && !document.querySelector('.v2-tfoot')) {
+        var foot = document.createElement('div');
+        foot.className = 'v2-tfoot';
+        foot.innerHTML =
+          '<span>Showing <span class="v2-shown">0</span> of <span class="v2-total">0</span></span>' +
+          '<span class="v2-tfoot-sep">·</span>' +
+          '<span>Updated <span class="v2-updated">just now</span></span>' +
+          '<span class="v2-tfoot-tip">Tip: press <span class="v2-kbd">⇧ J</span> / <span class="v2-kbd">⇧ K</span> to walk the list</span>';
+        box.parentNode.insertBefore(foot, box.nextSibling);
+      }
+      // Keep nav badges fresh when the Enrollment / Accounts lists reload,
+      // not only when devices change. MutationObserver is cheap for childList.
+      try {
+        var mo = new MutationObserver(function () {
+          if (typeof window.hcV2Refresh === 'function') window.hcV2Refresh();
+        });
+        var keysList = document.getElementById('keys');
+        if (keysList) mo.observe(keysList, { childList: true });
+        var acctList = document.getElementById('accounts');
+        if (acctList) mo.observe(acctList, { childList: true });
+      } catch (e) {}
+    } catch (e) { console.warn('v2 mount error', e); }
+  });
+
+  // Called from renderDevices after each render pass. Idempotent — only
+  // updates text/counts of elements v2Mount already created. `devicesCache`
+  // is a module-scope `let` so it's reachable from this closure, but it
+  // only becomes populated once showApp → loadDevices has run; guard for
+  // its temporal-dead-zone period on the very first call.
+  window.hcV2Refresh = function () {
+    try {
+      var list = devicesCache || [];
+      // Nav badges — populate from live DOM for the pages that have lists
+      // (Devices from devicesCache, Enrollment from #keys children, Accounts
+      // from #accounts children). Alerts/Settings/Support stay unbadged.
+      function setBadge(view, n) {
+        var b = document.querySelector('.nav-item[data-view="' + view + '"] .v2-badge');
+        if (b) b.textContent = (typeof n === 'number' && n > 0) ? n : '';
+      }
+      setBadge('devices', list.length);
+      setBadge('enrollment', document.querySelectorAll('#keys > .linkrow').length);
+      setBadge('accounts', document.querySelectorAll('#accounts > *').length);
+      // Table footer counts
+      var shown = document.querySelectorAll('#devices > .device-row').length;
+      var se = document.querySelector('.v2-shown'); if (se) se.textContent = shown;
+      var te = document.querySelector('.v2-total'); if (te) te.textContent = list.length;
+      var ue = document.querySelector('.v2-updated'); if (ue) ue.textContent = 'just now';
+      // Stat delta captions (derived — not real deltas, but informative)
+      var online = list.filter(function (d) { return d.online; }).length;
+      var busy = list.filter(function (d) { return d.busy; }).length;
+      var uninst = list.filter(function (d) { return (d.uninstalled); }).length;
+      var sleeping = list.filter(function (d) { return d.asleep; }).length;
+      var offline = list.length - online - uninst - sleeping;
+      function setDelta(statId, text, cls) {
+        var tile = document.getElementById(statId);
+        if (!tile) return;
+        var card = tile.closest('.stat');
+        if (!card) return;
+        var d = card.querySelector('.v2-delta');
+        if (!d) return;
+        d.textContent = text;
+        d.className = 'v2-delta ' + (cls || '');
+      }
+      setDelta('st-total',       list.length ? ('↑ ' + list.length + ' total') : 'no devices', 'up');
+      setDelta('st-online',      'of ' + list.length + ' total', '');
+      setDelta('st-uninstalled', uninst ? (uninst + ' removed') : 'none removed', uninst ? 'down' : '');
+      setDelta('st-offline',     offline ? (offline + ' not reachable') : 'all reachable', offline ? 'down' : '');
+    } catch (e) { /* non-fatal */ }
+  };
+}
+let ws = null, admin = null, attachedId = null;
+let frameW = 0, frameH = 0;
+// Deep-link support: /?device=<id>&solo=1 opens a focused window that auto-joins
+// one machine (used by "Open in new window" so several devices can be driven at once).
+const urlParams = new URLSearchParams(location.search);
+let autoAttachId = urlParams.get('device') || null;
+const soloWindow = urlParams.get('solo') === '1';
+// PWA install: browsers won't install silently, but we can capture their install
+// offer and fire it the FIRST time the operator clicks Join, so from then on Join
+// opens the machine in the installed TempleConnect app window.
+let deferredInstall = null;
+let hcInstalled = false;
+try { if (localStorage.getItem('hc-installed')) hcInstalled = true; } catch {}
+if (matchMedia('(display-mode: standalone)').matches || window.navigator.standalone) hcInstalled = true;
+window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); deferredInstall = e; });
+window.addEventListener('appinstalled', () => { hcInstalled = true; deferredInstall = null; try { localStorage.setItem('hc-installed', '1'); } catch {} });
+let devicesCache = [];
+let deviceCards = new Map(); // id -> {el, sig} for in-place card reconciliation
+let statsCache = { downloads: 0, installs: 0, conversion: 0, byKey: [] };
+let filter = 'all';
+let search = '';
+const pressed = new Set();
+
+// ---------------------------------------------------------------------------
+// API + UI helpers
+// ---------------------------------------------------------------------------
+async function api(path, method, body) {
+  const token = localStorage.getItem('authToken');
+  const headers = {};
+  if (body) headers['Content-Type'] = 'application/json';
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  const r = await fetch(path, {
+    method: method || 'GET',
+    headers: headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+  return data;
+}
+
+function toast(msg, kind = '') {
+  const el = document.createElement('div');
+  el.className = 'toast ' + kind;
+  el.innerHTML = '<span class="tdot"></span><span></span>';
+  el.querySelector('span:last-child').textContent = msg;
+  $('#toasts').appendChild(el);
+  setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 260); }, 2800);
+}
+
+// Promise-based modal. type: 'prompt' | 'confirm' | 'password' | 'select'
+function modal({ title, message, fields = [], confirmText = 'Confirm', cancelText = 'Cancel', danger = false }) {
+  return new Promise((resolve) => {
+    const back = document.createElement('div');
+    back.className = 'modal-back';
+    const fieldHtml = fields.map((f, i) => {
+      const ctrl = f.type === 'select'
+        ? `<select data-i="${i}">${(f.options || []).map((o, oi) => `<option value="${oi}">${o.label !== undefined ? o.label : o}</option>`).join('')}</select>`
+        : `<input data-i="${i}" type="${f.type || 'text'}" placeholder="${f.placeholder || ''}" value="${f.value || ''}"/>`;
+      return `<label class="field"><span>${f.label}</span>${ctrl}</label>`;
+    }).join('');
+    back.innerHTML = `<div class="modal">
+      <h3></h3>${message ? '<p></p>' : ''}${fieldHtml}
+      <div class="modal-actions">
+        <button class="btn ghost" data-act="cancel"></button>
+        <button class="btn ${danger ? 'danger' : 'primary'}" data-act="ok">${confirmText}</button>
+      </div></div>`;
+    back.querySelector('[data-act="cancel"]').textContent = cancelText;
+    back.querySelector('h3').textContent = title;
+    if (message) back.querySelector('p').textContent = message;
+    document.body.appendChild(back);
+    const inputs = $$('input,select', back);
+    const firstText = $$('input', back)[0];
+    if (firstText) firstText.focus();
+    const done = (val) => { back.remove(); resolve(val); };
+    back.addEventListener('click', (e) => { if (e.target === back) done(null); });
+    back.querySelector('[data-act="cancel"]').onclick = () => done(null);
+    back.querySelector('[data-act="ok"]').onclick = () => {
+      if (!fields.length) return done(true);
+      done(inputs.map((i) => i.value));
+    };
+    back.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') back.querySelector('[data-act="ok"]').click();
+      if (e.key === 'Escape') done(null);
+    });
+  });
+}
+
+function relTime(ts) {
+  if (!ts) return '-';
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 45) return 'just now';
+  if (s < 90) return 'a minute ago';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + ' min ago';
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + (h === 1 ? ' hour ago' : ' hours ago');
+  const d = Math.floor(h / 24);
+  if (d < 30) return d + (d === 1 ? ' day ago' : ' days ago');
+  return new Date(ts).toLocaleDateString();
+}
+function fmtDate(ts) { return ts ? new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '-'; }
+
+// Click handler for the red "Control blocked by antivirus" banner. Opens a
+// custom modal with a one-click fix (switch to the PowerShell input backend
+// — hosts the SAME input logic inside Microsoft-signed powershell.exe, which
+// signature-based blocklists cannot match) plus plain-English whitelist
+// steps if the owner wants to fix it at the device instead.
+function showControlBlockedHelp() {
+  const d = devicesCache.find((x) => x.id === attachedId);
+  const currBackend = (d && d.meta && d.meta.injectorBackend) || 'exe';
+  const nextBackend = currBackend === 'powershell' ? 'exe' : 'powershell';
+  const back = document.createElement('div');
+  back.className = 'modal-back';
+  back.innerHTML = '<div class="modal" style="max-width:520px">\
+    <h3>Antivirus is blocking the input helper</h3>\
+    <p>Clicks and keystrokes aren\'t landing on this device because its antivirus (usually McAfee WPS or Windows Defender) quarantined <code>injector.exe</code>. Pick a fix:</p>\
+    <div class="ctl-fix-list">\
+      <div class="ctl-fix">\
+        <div class="ctl-fix-h">1 &middot; Switch to the PowerShell backend <span class="ctl-fix-tag ok">recommended</span></div>\
+        <p>Runs the exact same input logic inside Microsoft-signed <code>powershell.exe</code>. Nothing to install on the remote PC, no one needs to touch it. Takes ~2 seconds to reconnect.</p>\
+        <button class="btn primary small" data-act="switch">Switch to ' + (nextBackend === 'powershell' ? 'PowerShell' : 'exe') + ' now</button>\
+      </div>\
+      <div class="ctl-fix">\
+        <div class="ctl-fix-h">2 &middot; Whitelist the installer at the device</div>\
+        <p>Someone at the remote PC opens their antivirus and adds <code>C:\\Program Files\\Support\\</code> to the exclusion list. Reliable, but needs a human on the device.</p>\
+        <details><summary>Step-by-step for McAfee</summary><ol>\
+          <li>Open <b>McAfee</b> from the taskbar.</li>\
+          <li>Go to <b>PC Security &rarr; Real-Time Scanning</b>.</li>\
+          <li>Click the gear icon &rarr; <b>Excluded Files &rarr; Add file</b>.</li>\
+          <li>Add both: <code>C:\\Program Files\\Support\\injector.exe</code> and the folder <code>C:\\Program Files\\Support\\</code>.</li>\
+          <li>Reconnect this session \u2014 the banner should clear within 30 seconds.</li>\
+        </ol></details>\
+        <details><summary>Step-by-step for Windows Defender</summary><ol>\
+          <li>Start &rarr; <b>Windows Security</b>.</li>\
+          <li><b>Virus &amp; threat protection &rarr; Manage settings &rarr; Exclusions &rarr; Add an exclusion &rarr; Folder</b>.</li>\
+          <li>Pick <code>C:\\Program Files\\Support\\</code>.</li>\
+          <li>Reconnect.</li>\
+        </ol></details>\
+      </div>\
+      <div class="ctl-fix ctl-fix-dim">\
+        <div class="ctl-fix-h">3 &middot; Permanent fix: code-sign the installer</div>\
+        <p>A signed <code>injector.exe</code> stops being flagged everywhere, not just on this one PC. Owner-only, needs a code-signing certificate.</p>\
+      </div>\
+    </div>\
+    <div class="modal-actions">\
+      <button class="btn ghost" data-act="close">Close</button>\
+    </div>\
+  </div>';
+  const close = () => { try { back.remove(); } catch {} };
+  back.addEventListener('click', (e) => { if (e.target === back) close(); });
+  back.querySelector('[data-act="close"]').addEventListener('click', close);
+  back.querySelector('[data-act="switch"]').addEventListener('click', () => {
+    if (!attachedId) { toast('No device attached', 'err'); return; }
+    deviceOp(attachedId, 'inject-backend', { backend: nextBackend }, { onResult: (m) => {
+      if (!m.ok) { toast(m.error || 'failed', 'err'); return; }
+      const applied = (m.data && m.data.backend) || nextBackend;
+      if (d && d.meta) d.meta.injectorBackend = applied;
+      const cached = devicesCache.find((x) => x.id === attachedId);
+      if (cached) { cached.meta = cached.meta || {}; cached.meta.injectorBackend = applied; }
+      toast('Switched to ' + applied + ' backend \u2014 reconnecting injector', 'ok');
+      close();
+    }});
+  });
+  document.body.appendChild(back);
+}
+// Wire the banner click once the DOM is ready. The banner itself is a <button>
+// in app.html so it's keyboard-focusable and Enter triggers click.
+document.addEventListener('DOMContentLoaded', () => {
+  const el = document.getElementById('ctl-warn');
+  if (el) el.addEventListener('click', showControlBlockedHelp);
+});
+
+// ---------------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------------
+$('#auth-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  $('#auth-err').textContent = '';
+  const btn = $('#au-submit');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: $('#au-email').value.trim(), password: $('#au-pass').value }) });
+    const data = await r.json().catch(() => ({}));
+    if (r.ok) { showApp(data.admin); return; }
+    if (data.expired) {
+      const bot = data.botUrl || 'https://t.me/templerunconnect';
+      $('#auth-err').innerHTML = 'Your subscription has ended. Renew on our Telegram bot to sign in again.<br><a href="' + bot + '" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline;font-weight:600">Open the Telegram bot to renew</a>';
+    } else {
+      $('#auth-err').textContent = data.error || 'Login failed';
+    }
+    btn.disabled = false;
+  } catch (err) {
+    $('#auth-err').textContent = 'Network error, please try again';
+    btn.disabled = false;
+  }
+});
+
+async function changePassword() {
+  const vals = await modal({
+    title: 'Change password',
+    fields: [
+      { label: 'Current password', type: 'password' },
+      { label: 'New password (6+ characters)', type: 'password' },
+    ],
+    confirmText: 'Update password',
+  });
+  if (!vals) return;
+  try {
+    await api('/api/password', 'POST', { currentPassword: vals[0], newPassword: vals[1] });
+    if (admin) admin.mustChangePassword = false;
+    toast('Password changed', 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+}
+$('#change-pw').addEventListener('click', changePassword);
+
+$('#logout').addEventListener('click', async () => {
+  try { await api('/api/logout', 'POST'); } catch {}
+  if (ws) try { ws.close(); } catch {}
+  location.reload();
+});
+
+// ---------------------------------------------------------------------------
+// App shell + navigation
+// ---------------------------------------------------------------------------
+function showApp(a) {
+  admin = a;
+  $('#auth-view').hidden = true;
+  $('#app-view').hidden = false;
+  if (soloWindow) document.body.classList.add('solo'); // focused single-device window
+  const owner = a.role === 'owner';
+  $('#side-name').textContent = a.name || a.email;
+  $('#side-role').textContent = a.role || 'admin';
+  $('#side-avatar').textContent = (a.name || a.email || 'A').charAt(0).toUpperCase();
+  // v2 chrome mirrors the identity into the topbar crumbs/user pill and the
+  // rail org picker. No-op in legacy mode (elements aren't mounted).
+  if (HC_V2) {
+    var _nm = a.name || (a.email ? a.email.split('@')[0] : 'Account');
+    var _in = (_nm || 'A').charAt(0).toUpperCase();
+    var crumbOrg = document.querySelector('.v2-crumb-org'); if (crumbOrg) crumbOrg.textContent = _nm;
+    var up = document.getElementById('v2-user-pill');
+    if (up) {
+      up.querySelector('.v2-user-av').textContent = _in;
+      up.querySelector('.v2-user-name').textContent = _nm;
+    }
+    var oa = document.querySelector('.v2-org-av'); if (oa) oa.textContent = _in;
+    var on = document.querySelector('.v2-org-name'); if (on) on.textContent = _nm;
+    var or = document.querySelector('.v2-org-role'); if (or) or.textContent = (a.role === 'owner' ? 'Owner' : (a.role || 'Operator'));
+  }
+  $('#set-user').textContent = a.email;
+  $('#set-role').textContent = a.role || 'admin';
+  $$('.owner-only').forEach((el) => (el.hidden = !owner));
+  deviceCards.clear(); $('#devices').innerHTML = ''; // fresh card set for this account
+  if (owner) loadAccounts();
+  loadKeys();
+  if (owner) loadEnrollLog();
+  loadStats();
+  loadAlerts();
+  fillSupport();
+  loadSubscription();
+  checkInstaller();
+  loadBlankImage();
+  connectWS();
+  routeInit(); // restore the section from the URL hash (deep-link / reload / back-forward)
+  if (a.mustChangePassword) setTimeout(() => { toast('Please set your own password', ''); changePassword(); }, 500);
+}
+function showAuth() { $('#auth-view').hidden = false; $('#app-view').hidden = true; }
+
+async function fillAuthSupport() {
+  try {
+    const s = await api('/api/support');
+    const wrap = document.getElementById('auth-support');
+    const tg = document.getElementById('auth-tg');
+    if (tg && s.tg) { tg.href = 'https://t.me/' + s.tg; tg.hidden = false; }
+    if (wrap) wrap.hidden = false;
+  } catch {}
+}
+async function fillSupport() {
+  try {
+    const s = await api('/api/support');
+    const tg = document.getElementById('sup-tg');
+    if (tg && s.tg) tg.innerHTML = '<a class="btn primary small" target="_blank" rel="noopener" href="https://t.me/' + encodeURIComponent(s.tg) + '">Message on Telegram</a>';
+  } catch {}
+}
+function validView(v) { return !!v && $$('.nav-item').some((n) => n.dataset.view === v); }
+function applyView(view) {
+  $$('.nav-item').forEach((n) => n.classList.toggle('active', n.dataset.view === view));
+  $$('.page').forEach((p) => (p.hidden = p.dataset.page !== view));
+}
+// Hash-based routing: each section has its own URL (#enrollment, #alerts, ...) so a
+// reload, back/forward, or bookmark stays on that section instead of resetting to Devices.
+function goto(view) {
+  if (!validView(view)) return;
+  if (location.hash.slice(1) === view) applyView(view); // same hash won't fire hashchange
+  else location.hash = view;                            // triggers hashchange -> applyView
+}
+window.addEventListener('hashchange', () => { const v = location.hash.slice(1); if (validView(v)) applyView(v); });
+$$('.nav-item').forEach((n) => n.addEventListener('click', () => goto(n.dataset.view)));
+document.addEventListener('click', (e) => { const g = e.target.closest('[data-goto]'); if (g) goto(g.dataset.goto); });
+// Restore the section from the URL once the app is shown (default: devices).
+function routeInit() { if (soloWindow) return; const v = location.hash.slice(1); applyView(validView(v) ? v : 'devices'); }
+
+(async function init() {
+  fillAuthSupport(); // populate the login-screen support links (public endpoint)
+  showSoloLoader(); // cover the dashboard until we attach (app/solo windows only)
+  // Already signed in (browser, or the app's own persisted login)? Go straight in.
+  try { const { admin: a } = await api('/api/me'); return showApp(a); } catch {}
+  // Desktop-app handoff: exchange the one-time token for a session, then continue.
+  const handoff = urlParams.get('token');
+  if (handoff) {
+    try {
+      await fetch('/api/app-login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: handoff }) });
+      // strip the token from the URL so it isn't kept or reused
+      try { history.replaceState(null, '', location.pathname + '?device=' + encodeURIComponent(urlParams.get('device') || '') + '&solo=1&app=1'); } catch {}
+      const { admin: a } = await api('/api/me'); return showApp(a);
+    } catch {}
+  }
+  showAuth();
+})();
+
+// ---------------------------------------------------------------------------
+// WebSocket (console)
+// ---------------------------------------------------------------------------
+let consoleReconnectT = null;
+function connectWS() {
+  if (consoleReconnectT) { clearTimeout(consoleReconnectT); consoleReconnectT = null; }
+  if (ws) { try { ws.onclose = null; ws.close(); } catch {} }
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ type: 'register', role: 'console' }));
+    if (attachedId) {
+      // In a solo window, a dropped session should re-join the same machine on
+      // reconnect (not close the window); elsewhere just reset the session UI.
+      const wasAttached = attachedId;
+      backToDashboard();
+      if (soloWindow) autoAttachId = wasAttached; // maybeAutoAttach re-joins when 'agents' arrives
+    }
+  };
+  ws.onmessage = (ev) => {
+    if (ev.data instanceof ArrayBuffer) { if (!$('#screen-wrap').classList.contains('rtc')) drawBinaryFrame(ev.data); return; } // JPEG frame (ignored while WebRTC video is up)
+    let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+    switch (msg.type) {
+      case 'agents': devicesCache = msg.list; renderDevices(); maybeAutoAttach(); break;
+      case 'stats': applyStats(msg.stats); break;
+      case 'inputAck': break;
+      case 'inputStats': break;
+      case 'attached': onAttached(msg); break;
+      case 'frame': drawFrame(msg); break;
+      case 'monitors': renderMonitors(msg); break;
+      case 'rtc-offer': onRtcOffer(msg); break;
+      case 'rtc-ice': if (rtcPc && msg.candidate) { rtcDiag.remoteCand.add(candType(msg.candidate)); rtcLog('remote candidate', candType(msg.candidate)); rtcPc.addIceCandidate(msg.candidate).catch((e) => rtcLog('addIceCandidate error', e.message)); } break;
+      // Webcam channel (parallel to the screen rtcPc). The agent opens the
+      // camera on cam-start and offers a track; we answer here and show it in
+      // the side panel. See the Camera section near the end of the file.
+      case 'cam-rtc-offer': onCamRtcOffer(msg); break;
+      case 'cam-rtc-ice':   if (camPc && msg.candidate) camPc.addIceCandidate(msg.candidate).catch(() => {}); break;
+      case 'cam-state':     onCamState(msg); break;
+      case 'mic-rtc-offer': onMicRtcOffer(msg); break;
+      case 'mic-rtc-ice':   if (micPc && msg.candidate) micPc.addIceCandidate(msg.candidate).catch(() => {}); break;
+      case 'mic-state':     onMicState(msg); break;
+      case 'verify-result': onVerifyResult(msg); break;
+      case 'control': {
+        $('#ctl-warn').hidden = msg.available !== false ? true : false;
+        if (msg.available === false) toast('Control is blocked by antivirus. Click the red banner for a one-click fix.', 'err');
+        break;
+      }
+      case 'agentGone': toast('Device disconnected', 'err'); backToDashboard(); leaveSolo(); break;
+      // Agent reports its screen dimensions (also sent when locked so the console
+      // can size the canvas correctly without waiting for the first JPEG frame).
+      case 'screen': if (msg.w && msg.h) { frameW = msg.w; frameH = msg.h; canvas.width = msg.w; canvas.height = msg.h; fit(); } if (!$('#screen-wrap').classList.contains('rtc') && !$('#rtc-mode').classList.contains('sd')) setRtcMode('sd'); break;
+      // Agent signals the Windows lock screen is active/cleared.
+      case 'locked': {
+        const lo = $('#lock-overlay');
+        // live:true means the SYSTEM helper is streaming the real lock screen, so
+        // hide the "waiting to unlock" placeholder and let the frames show (input
+        // already routes to the Winlogon desktop). Without live, keep the placeholder.
+        if (lo) lo.hidden = !msg.on || !!msg.live;
+        if (msg.on && !$('#screen-wrap').classList.contains('rtc')) setRtcMode('sd');
+        break;
+      }
+      case 'error': toast(msg.text, 'err'); break;
+      case 'info': toast(msg.text, 'ok'); break;
+      case 'opStream': if (msg.reqId === termReqId) onOpStream(msg); else fsDispatch('stream', msg); break;
+      case 'opEnd': if (msg.reqId === termReqId) onOpEnd(msg); else fsDispatch('end', msg); break;
+      case 'opResult': fsDispatch('result', msg); break;
+      case 'denied': showAuth(); break;
+    }
+  };
+  // Auto-reconnect (e.g. after a relay redeploy) so Join and everything else keep
+  // working without a page refresh.
+  ws.onclose = () => { if (admin && !consoleReconnectT) consoleReconnectT = setTimeout(connectWS, 2000); };
+  ws.onerror = () => { try { ws.close(); } catch {} };
+}
+
+// ---------------------------------------------------------------------------
+// Devices
+// ---------------------------------------------------------------------------
+const DEV_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>';
+// Inline SVG icon set (replaces emoji for a professional, theme-aware look).
+const PW_ICONS = {
+  lock: '<svg viewBox="0 0 24 24" class="ic"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/></svg>',
+  logoff: '<svg viewBox="0 0 24 24" class="ic"><path d="M15 4h4v16h-4"/><path d="M10 8l-4 4 4 4"/><path d="M6 12h9"/></svg>',
+  sleep: '<svg viewBox="0 0 24 24" class="ic"><path d="M21 12.8A8 8 0 1111 3a6.5 6.5 0 0010 9.8z"/></svg>',
+  restart: '<svg viewBox="0 0 24 24" class="ic"><path d="M21 12a9 9 0 11-3-6.7"/><path d="M21 4v5h-5"/></svg>',
+  shutdown: '<svg viewBox="0 0 24 24" class="ic"><path d="M12 3v9"/><path d="M7 6a8 8 0 1010 0"/></svg>',
+};
+const KA_ICON = '<svg viewBox="0 0 24 24" class="ic"><path d="M4 8h13v5a4 4 0 01-4 4H8a4 4 0 01-4-4z"/><path d="M17 9h2a2 2 0 010 4h-2"/><path d="M7 3v2M11 3v2M15 3v2"/></svg>';
+const ALERT_ICONS = {
+  install: '<svg viewBox="0 0 24 24" class="ic" style="color:var(--green)"><path d="M20 6L9 17l-5-5"/></svg>',
+  online: '<svg viewBox="0 0 24 24" class="ic" style="color:var(--green)"><path d="M5 12.5a10 10 0 0114 0"/><path d="M8.5 15.5a5 5 0 017 0"/><path d="M12 19h.01"/></svg>',
+  offline: '<svg viewBox="0 0 24 24" class="ic" style="color:var(--red)"><path d="M12 3v9"/><path d="M7 6a8 8 0 1010 0"/><path d="M3 3l18 18"/></svg>',
+  uninstall: '<svg viewBox="0 0 24 24" class="ic" style="color:var(--txt3)"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>',
+};
+
+function fmtIdle(s) {
+  if (s == null) return '';
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + 'm';
+  return Math.floor(m / 60) + 'h';
+}
+function presenceInfo(d) {
+  if (!d.online || !d.presence) return null;
+  const p = d.presence;
+  if (p.state === 'locked') return { cls: 'locked', text: 'Locked' };
+  if (p.state === 'idle') return { cls: 'idle', text: 'Idle ' + fmtIdle(p.idle) };
+  if (p.state === 'active') return { cls: 'active', text: 'In use' };
+  return null;
+}
+function statusOf(d) {
+  if (d.online) return d.busy ? 'busy' : 'online';
+  if (d.uninstalled) return 'uninstalled';
+  if (d.asleep) return 'sleep';
+  return 'offline';
+}
+function closeCardMenus(except) { $$('.card-menu').forEach((m) => { if (m !== except) m.hidden = true; }); }
+document.addEventListener('click', () => closeCardMenus(null));
+function statusLabel(s) {
+  return s === 'busy' ? 'In session' : s === 'online' ? 'Online'
+    : s === 'uninstalled' ? 'Uninstalled' : s === 'sleep' ? 'Sleeping' : 'Offline';
+}
+
+function renderDevices() {
+  const list = devicesCache;
+  const online = list.filter((d) => d.online).length;
+  const busy = list.filter((d) => d.busy).length;
+  const uninstalled = list.filter((d) => statusOf(d) === 'uninstalled').length;
+  const sleeping = list.filter((d) => statusOf(d) === 'sleep').length;
+  $('#st-total').textContent = list.length;
+  $('#st-online').textContent = online;
+  $('#st-busy').textContent = busy;
+  $('#st-sleep').textContent = sleeping;
+  const offlineCount = list.length - online - uninstalled - sleeping;
+  $('#st-offline').textContent = offlineCount;
+  $('#st-uninstalled').textContent = uninstalled;
+  // v2 only: paint matching counts into the filter-chip row so the operator
+  // sees at-a-glance how many devices each filter would reveal. "Newly
+  // installed" / "Older" use firstSeen, same windows as the filter below.
+  if (HC_V2) {
+    const nowMs = Date.now();
+    const newly = list.filter((d) => d.firstSeen && nowMs - d.firstSeen < 7 * 86400000).length;
+    const older = list.filter((d) => d.firstSeen && nowMs - d.firstSeen > 30 * 86400000).length;
+    const counts = { all: list.length, online, sleep: sleeping, offline: offlineCount, uninstalled, new: newly, old: older };
+    for (const b of $$('#dev-filter .seg-btn')) {
+      const k = b.dataset.f;
+      const n = counts[k];
+      // Keep the original label unchanged — stash it once, then re-render as
+      // "<label> <count>" so the operator keeps the plain word.
+      if (!b.dataset.labelCache) b.dataset.labelCache = b.textContent.replace(/\s+\d+$/, '').trim();
+      const labelOnly = b.dataset.labelCache;
+      b.innerHTML = '';
+      b.appendChild(document.createTextNode(labelOnly + ' '));
+      const c = document.createElement('span');
+      c.className = 'seg-count';
+      c.textContent = (typeof n === 'number' ? n : 0);
+      b.appendChild(c);
+    }
+  }
+
+  const q = search.toLowerCase();
+  const shown = list.filter((d) => {
+    const st = statusOf(d);
+    if (filter === 'online' && !d.online) return false;
+    if (filter === 'busy' && !d.busy) return false;
+    if (filter === 'sleep' && st !== 'sleep') return false;
+    if (filter === 'offline' && st !== 'offline') return false;
+    if (filter === 'uninstalled' && st !== 'uninstalled') return false;
+    if (filter === 'new' && !(d.firstSeen && Date.now() - d.firstSeen < 7 * 86400000)) return false;   // installed in the last 7 days
+    if (filter === 'old' && !(d.firstSeen && Date.now() - d.firstSeen > 30 * 86400000)) return false;  // installed over 30 days ago
+    if (q) {
+      const hay = (d.name + ' ' + (d.meta?.host || '') + ' ' + (d.meta?.os || '') + ' ' + (d.meta?.user || '')).toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+
+  const box = $('#devices');
+  $('#dev-empty').hidden = list.length !== 0;
+  box.hidden = list.length === 0;
+
+  // Reconcile in place: update existing cards, create/remove only as needed, so
+  // the list never flashes/rebuilds on a presence or stats push.
+  const seen = new Set();
+  for (const d of shown) {
+    seen.add(d.id);
+    const st = statusOf(d);
+    const sig = st + '|' + (d.online ? 1 : 0) + '|' + (d.busy ? 1 : 0); // structure-affecting state
+    let entry = deviceCards.get(d.id);
+    if (!entry || entry.sig !== sig) {
+      const el = createDeviceCard(d, st);
+      el.classList.add('enter');
+      if (entry) entry.el.replaceWith(el); else box.appendChild(el);
+      deviceCards.set(d.id, { el, sig });
+    } else {
+      updateDeviceCard(entry.el, d, st);
+    }
+  }
+  for (const [id, entry] of deviceCards) if (!seen.has(id)) { entry.el.remove(); deviceCards.delete(id); }
+  // Keep DOM order matching `shown`, but ONLY move a node when it's actually out of
+  // position. Blindly re-appending every card on each push causes visible flicker.
+  let idx = 0;
+  for (const d of shown) {
+    const e = deviceCards.get(d.id);
+    if (!e) continue;
+    const cur = box.children[idx];
+    if (cur !== e.el) box.insertBefore(e.el, cur || null);
+    idx++;
+  }
+  if (HC_V2 && typeof window.hcV2Refresh === 'function') window.hcV2Refresh();
+}
+// ScreenConnect-style compact row. OS icon · status dot · name/user@host ·
+// presence · last seen · Join + kebab. All actions live in the right-click menu.
+const WIN_ICON = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5.4l7.2-1v7.1H3zM11 4.3L21 3v9.1H11zM3 12.5h7.2v7.1l-7.2-1zM11 12.5h10V21l-10-1.4z"/></svg>';
+const APPLE_ICON = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 3c.1 1.1-.3 2.1-1 2.9-.7.8-1.7 1.4-2.7 1.3-.1-1 .4-2.1 1-2.8.7-.8 1.9-1.4 2.7-1.4zM19 17c-.5 1.2-.8 1.7-1.5 2.7-1 1.4-2.3 3.1-4 3.1-1.5 0-1.9-1-3.9-1s-2.5 1-3.9 1c-1.7 0-3-1.6-3.9-2.9-2.6-3.7-2.9-8.1-1.3-10.4 1.1-1.7 2.9-2.7 4.6-2.7 1.7 0 2.8 1 4.2 1 1.4 0 2.2-1 4.2-1 1.5 0 3.1.8 4.2 2.2-3.7 2-3.1 7.3.2 8.7z"/></svg>';
+const KEBAB_ICON = '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="12" cy="19" r="1.7"/></svg>';
+const CM = {
+  join: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9z"/></svg>',
+  term: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></svg>',
+  files: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h6l2 2h10v10H3z"/></svg>',
+  sys: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2.5 7 4-14 2.5 7h5"/></svg>',
+  deploy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4"/><path d="M4 21h16"/></svg>',
+  edit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4z"/></svg>',
+  del: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>',
+  backstage: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l2.5 2.5L7 14M12.5 14H16"/></svg>',
+  window: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6M20 4l-8 8"/><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></svg>',
+  lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/></svg>',
+  unlock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 017.5-2"/></svg>',
+};
+function osIcon(m) {
+  const os = (m.os || '').toLowerCase();
+  if (os.includes('mac') || os.includes('darwin')) return APPLE_ICON;
+  return WIN_ICON; // all current agents are Windows
+}
+function updateDeviceCard(el, d, st) {
+  const m = d.meta || {};
+  const nameEl = el.querySelector('.dr-name');
+  nameEl.textContent = d.name; nameEl.title = d.id;
+  // Dual-install: when a device has more than one copy installed on the remote
+  // PC, show a tiny chip next to the name labelling the active copy. The chip
+  // is a clickable pill; the popover lists all connected copies and lets the
+  // operator switch which one receives ops. Hidden entirely for the single-
+  // install case (zero visual impact on normal devices).
+  {
+    const chip = el.querySelector('.dr-instance');
+    if (chip) {
+      const insts = Array.isArray(d.instances) ? d.instances : [];
+      if (d.online && insts.length > 1) {
+        const active = d.activeInstance || (insts[0] && insts[0].instance) || 1;
+        const activeEntry = insts.find((x) => x.instance === active) || insts[0];
+        chip.hidden = false;
+        chip.innerHTML = '<span class="dr-inst-label">' + (activeEntry.appName || ('Copy ' + active)) + '</span><span class="dr-inst-caret">▾</span>';
+        chip.title = 'Switch active copy (' + insts.length + ' connected)';
+        chip.onclick = (ev) => { ev.stopPropagation(); showInstancePicker(d, chip); };
+      } else {
+        chip.hidden = true;
+        chip.innerHTML = '';
+        chip.onclick = null;
+      }
+    }
+  }
+  el.querySelector('.dr-status').className = 'dr-status st-' + st;
+  el.querySelector('.dr-status').title = statusLabel(st);
+  // v2 breaks the sub-line into a chip for the agent version so the fleet-
+  // wide version spread is readable at a glance (stale builds pop immediately
+  // in a muted amber in CSS). Legacy keeps the plain-text concatenation.
+  {
+    const subEl = el.querySelector('.dr-sub');
+    if (HC_V2) {
+      // v2 splits the sub-line's parts across dedicated columns: user → dr-user,
+      // version → dr-agent, tag → dr-tag. dr-sub itself only carries OS info
+      // (the mockup's second line under the hostname).
+      subEl.textContent = m.os ? m.os : '';
+      const uEl = el.querySelector('.dr-user');
+      if (uEl) uEl.textContent = m.user || '—';
+      const tEl = el.querySelector('.dr-tag');
+      if (tEl) {
+        const tagText = (window.v2Tag ? window.v2Tag(d) : '');
+        tEl.innerHTML = tagText ? ('<span class="dr-tag-chip">' + tagText + '</span>') : '';
+      }
+      const aEl = el.querySelector('.dr-agent');
+      if (aEl) {
+        if (m.build) {
+          const latest = (window.HC_LATEST_BUILD || 65);
+          const stale = Number(m.build) < latest ? ' stale' : '';
+          aEl.innerHTML = '<span class="dr-ver' + stale + '">v' + m.build + '</span>';
+        } else {
+          aEl.innerHTML = '';
+        }
+      }
+    } else {
+      const base = [(m.user || ''), (m.host || '')].filter(Boolean).join(' · ') + (m.os ? '  ·  ' + m.os : '');
+      subEl.textContent = base + (m.build ? '  ·  Agent v' + m.build : '');
+    }
+  }
+  const pres = presenceInfo(d);
+  const pe = el.querySelector('.dr-presence');
+  // v2: fall back to the top-level status (Online / In session / Sleeping /
+  // Offline) when there's no fine-grained presence (locked/idle/active). The
+  // CSS already colors .dr-presence by the row's status class, so one line
+  // here fills in every row the mockup shows a pill on. Legacy stays empty.
+  if (pres) {
+    pe.className = 'dr-presence presence ' + pres.cls;
+    pe.textContent = pres.text;
+  } else if (HC_V2) {
+    pe.className = 'dr-presence presence ' + st;
+    pe.textContent = statusLabel(st);
+  } else {
+    pe.className = 'dr-presence';
+    pe.textContent = '';
+  }
+  // v2: LAST SEEN column shows relative TIME, not the redundant status word
+  // (the pill in the previous column already says "Online"/"Offline"). Legacy
+  // keeps the old concatenation so nothing shifts for operators on ?legacy=1.
+  const seenEl = el.querySelector('.dr-seen');
+  if (HC_V2) {
+    seenEl.textContent = (st === 'uninstalled')
+      ? relTime(d.uninstalledAt)
+      : (d.online ? (d.lastSeen ? relTime(d.lastSeen) : 'just now') : relTime(d.lastSeen));
+  } else {
+    seenEl.textContent = d.online ? statusLabel(st) : (st === 'uninstalled' ? relTime(d.uninstalledAt) : relTime(d.lastSeen));
+  }
+  const lk = el.querySelector('.dr-lock');
+  if (lk) {
+    if (d.protected) {
+      lk.hidden = false;
+      lk.innerHTML = d.uninstallAuthorized ? CM.unlock : CM.lock;
+      lk.className = 'dr-lock' + (d.uninstallAuthorized ? ' released' : '');
+      lk.title = d.uninstallAuthorized ? 'Uninstall released — this device can be removed at the PC' : 'Protected from uninstall';
+    } else { lk.hidden = true; lk.innerHTML = ''; }
+  }
+}
+function createDeviceCard(d, st) {
+  const m = d.meta || {};
+  const el = document.createElement('div');
+  el.className = 'device-row' + (d.online ? ' online' : '') + (d.busy ? ' busy' : '') + (st === 'uninstalled' ? ' uninstalled' : '') + (st === 'sleep' ? ' asleep' : '');
+  el.dataset.id = d.id;
+  // v2 extends the row with three dedicated columns (tag / signed-in / agent)
+  // so each piece of metadata has its own cell matching the mockup. Legacy
+  // mode keeps the compact 4-cell layout — the extra spans just stay empty.
+  const extraCols = HC_V2
+    ? '<span class="dr-tag"></span><span class="dr-user"></span><span class="dr-agent"></span>'
+    : '';
+  el.innerHTML = `
+      <span class="dr-os">${osIcon(m)}</span>
+      <span class="dr-status st-${st}"><span class="status-dot"></span></span>
+      <div class="dr-main"><span class="dr-name"></span><span class="dr-instance" hidden></span><span class="dr-sub"></span></div>
+      <span class="dr-presence"></span>
+      ${extraCols}
+      <span class="dr-lock" hidden></span>
+      <span class="dr-seen"></span>
+      <div class="dr-actions">
+        ${d.online && !d.busy ? '<button class="btn primary xs dr-join">Join</button>' : (d.busy ? '<button class="btn primary xs dr-join">Rejoin</button>' : '')}
+        <button class="btn ghost icon-btn dr-more" title="Actions">${KEBAB_ICON}</button>
+      </div>`;
+  updateDeviceCard(el, d, st);
+  const join = el.querySelector('.dr-join');
+  if (join) join.addEventListener('click', (e) => { e.stopPropagation(); joinDevice(d); });
+  el.querySelector('.dr-more').addEventListener('click', (e) => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); showDeviceMenu(d, r.right - 4, r.bottom + 4); });
+  el.addEventListener('contextmenu', (e) => { e.preventDefault(); showDeviceMenu(d, e.clientX, e.clientY); });
+  el.addEventListener('dblclick', () => { if (d.online && !d.busy) joinDevice(d); });
+  return el;
+}
+// Right-click / kebab context menu - the ScreenConnect-style action list.
+let ctxMenuEl = null;
+function closeDeviceMenu() { if (ctxMenuEl) { ctxMenuEl.remove(); ctxMenuEl = null; } }
+
+// Dual-install dropdown anchored to the .dr-instance chip. Lists every
+// currently-connected copy of this device and lets the owner pick which one is
+// active (receives ops). Secondary copies stay connected in the background so
+// the switch is instant — no reconnect, no disruption.
+let instancePickerEl = null;
+function closeInstancePicker() { if (instancePickerEl) { instancePickerEl.remove(); instancePickerEl = null; } }
+document.addEventListener('click', closeInstancePicker);
+window.addEventListener('resize', closeInstancePicker);
+function showInstancePicker(d, anchor) {
+  closeInstancePicker();
+  closeDeviceMenu();
+  const r = anchor.getBoundingClientRect();
+  const insts = Array.isArray(d.instances) ? d.instances : [];
+  const active = d.activeInstance || 1;
+  const menu = document.createElement('div');
+  menu.className = 'ctx-menu dr-inst-menu';
+  menu.style.left = Math.round(r.left) + 'px';
+  menu.style.top = Math.round(r.bottom + 4) + 'px';
+  menu.innerHTML = insts.map((e) => {
+    const isActive = e.instance === active;
+    return '<button class="ctx-item' + (isActive ? ' active' : '') + '" data-i="' + e.instance + '">'
+      + '<span class="ctx-ic">' + (isActive ? '●' : '○') + '</span>'
+      + '<span>' + (e.appName || ('Copy ' + e.instance)) + '</span>'
+      + '<span class="ctx-sub">' + (isActive ? 'active' : 'standby') + '</span>'
+      + '</button>';
+  }).join('')
+  + '<div class="ctx-sep"></div>'
+  + '<div class="ctx-note">If one copy is uninstalled, control automatically fails over to the other.</div>';
+  menu.addEventListener('click', (e) => e.stopPropagation());
+  menu.querySelectorAll('.ctx-item').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const want = Number(btn.dataset.i);
+      if (want === active) { closeInstancePicker(); return; }
+      try {
+        await api('/api/devices/active-instance', 'POST', { id: d.id, instance: want });
+        toast('Switched active copy', 'ok');
+        closeInstancePicker();
+      } catch (err) { toast(err.message || 'failed', 'err'); }
+    });
+  });
+  document.body.appendChild(menu);
+  instancePickerEl = menu;
+}
+document.addEventListener('click', closeDeviceMenu);
+window.addEventListener('resize', closeDeviceMenu);
+async function powerAction(d, action) {
+  const label = POWER_LABEL[action] || action;
+  if (POWER_CONFIRM[action]) { const ok = await modal({ title: label + '?', message: POWER_CONFIRM[action], confirmText: label, danger: action !== 'sleep' }); if (!ok) return; }
+  deviceOp(d.id, 'power', { action }, { onResult: (m) => toast(m.ok ? label + ' sent' : (m.error || 'failed'), m.ok ? 'ok' : 'err') });
+}
+function showDeviceMenu(d, x, y) {
+  closeDeviceMenu();
+  const items = [];
+  if (d.online && !d.busy) items.push({ label: 'Join', icon: CM.join, act: () => joinDevice(d), primary: true });
+  if (d.online) {
+    items.push({ label: 'Backstage', icon: CM.backstage, act: () => openBackstage(d) });
+    items.push({ label: 'Terminal', icon: CM.term, act: () => openTerminal(d) });
+    items.push({ label: 'File transfer', icon: CM.files, act: () => openFiles(d) });
+    items.push({ label: 'System monitor', icon: CM.sys, act: () => openSystem(d) });
+    items.push({ label: 'Deploy software', icon: CM.deploy, act: () => { openSystem(d); setTimeout(() => sysTab('deploy'), 0); } });
+    items.push({ sep: true });
+    items.push({ label: 'Lock local input', act: () => deviceOp(d.id, 'lockinput', { on: true }, { onResult: (m) => toast(m.ok ? 'Local input locked' : (m.error || 'failed'), m.ok ? 'ok' : 'err') }) });
+    // Keep Awake toggle, mirrored on the right-click menu so an operator can
+    // pin a sleep-prone laptop awake WITHOUT joining a session (useful for
+    // "set and forget" on devices they monitor). The ✓ reads the agent's
+    // reported state from meta.keepAwake (true when the OPERATOR manually
+    // locked it on — session auto-engage is transient and not reflected here).
+    {
+      const on = !!(d.meta && d.meta.keepAwake);
+      items.push({
+        label: on ? 'Keep Awake ✓' : 'Keep Awake',
+        act: () => deviceOp(d.id, 'keepawake', { on: !on }, { onResult: (m) => {
+          if (!m.ok) { toast(m.error || 'failed', 'err'); return; }
+          toast(m.data.keepAwake ? 'Keep awake on — survives sessions' : 'Keep awake off', 'ok');
+        }}),
+      });
+    }
+    // Input backend toggle. On a device where McAfee WPS / Smart App Control
+    // kills the standalone injector.exe (the "Control blocked" badge keeps
+    // reappearing), flipping to the PowerShell backend hosts the same input
+    // logic inside the Microsoft-signed powershell.exe so signature-based
+    // blocklists stop matching. Reads the current state from meta.injectorBackend
+    // and flips to the other side; a ✓ marks whichever is active. The op is
+    // defined in agent/main.js as 'inject-backend'.
+    {
+      const curr = (d.meta && d.meta.injectorBackend) || 'exe';
+      const actual = (d.meta && d.meta.injectorBackendActual) || curr;
+      const next = curr === 'powershell' ? 'exe' : 'powershell';
+      // Reflect auto-revert honestly: when the operator asked for PowerShell
+      // but AMSI/compile killed it, the agent flips the config back to exe
+      // after 3 fast-fail restarts (see injectorBackendActual in meta).
+      let label;
+      if (curr === actual) {
+        label = curr === 'powershell'
+          ? 'Input backend: PowerShell ✓ — switch to exe'
+          : 'Input backend: exe ✓ — try PowerShell (for McAfee)';
+      } else {
+        label = 'Input backend: PowerShell blocked by AV — running on exe, retry?';
+      }
+      items.push({
+        label,
+        act: () => deviceOp(d.id, 'inject-backend', { backend: next }, { onResult: (m) => {
+          if (!m.ok) { toast(m.error || 'failed', 'err'); return; }
+          // Patch our local cache so the next right-click shows the ✓ against
+          // the backend we just switched to. Full devicesCache refresh follows
+          // when the relay re-broadcasts; this just avoids a stale menu.
+          const applied = (m.data && m.data.backend) || next;
+          if (d.meta) d.meta.injectorBackend = applied;
+          const cached = devicesCache.find((x) => x.id === d.id);
+          if (cached) { cached.meta = cached.meta || {}; cached.meta.injectorBackend = applied; }
+          toast('Input backend set to ' + applied + ' — reconnecting injector', 'ok');
+        }}),
+      });
+    }
+    items.push({ label: 'Sign out user', act: () => powerAction(d, 'logoff') });
+    items.push({ label: 'Sleep', act: () => powerAction(d, 'sleep') });
+    items.push({ label: 'Restart', act: () => powerAction(d, 'restart') });
+    items.push({ label: 'Reboot to Safe Mode', act: () => powerAction(d, 'safemode') });
+    items.push({ label: 'Reboot to Normal Mode', act: () => powerAction(d, 'normalmode') });
+    items.push({ label: 'Shut down', act: () => powerAction(d, 'shutdown'), danger: true });
+    items.push({ sep: true });
+  }
+  // Uninstall protection (service-build feature): stop the remote uninstaller from
+  // running until the operator releases the device here.
+  if (d.protected) {
+    if (!d.uninstallAuthorized) items.push({ label: 'Allow uninstall', icon: CM.unlock, act: () => allowUninstall(d) });
+    else items.push({ label: 'Uninstall allowed ✓ — re-lock', icon: CM.lock, act: () => setProtection(d, true) }); // re-arm (clears the release)
+    items.push({ label: 'Turn off uninstall protection', icon: CM.unlock, act: () => setProtection(d, false) });
+  } else {
+    items.push({ label: 'Protect from uninstall', icon: CM.lock, act: () => setProtection(d, true) });
+  }
+  items.push({ sep: true });
+  if (d.screenshot) items.push({ label: 'Install screenshot', icon: CM.screenshot || '<span>📷</span>', act: () => showScreenshot(d) });
+  items.push({ label: 'Rename', icon: CM.edit, act: () => renameDevice(d) });
+  if (admin && admin.role === 'owner') {
+    items.push({ label: 'Move to account…', act: async () => {
+      let accounts;
+      try { const r = await api('/api/accounts'); accounts = r.accounts; } catch { toast('Could not load accounts', 'err'); return; }
+      if (!accounts || !accounts.length) { toast('No customer accounts found', 'err'); return; }
+      const vals = await modal({
+        title: 'Move device to account',
+        message: 'Select the account to assign "' + d.name + '" to:',
+        fields: [{ label: 'Target account', type: 'select', options: accounts.map((a) => a.username + (a.name && a.name !== a.username ? ' (' + a.name + ')' : '')) }],
+        confirmText: 'Move',
+      });
+      if (!vals) return;
+      const idx = parseInt(vals[0], 10); const target = accounts[isNaN(idx) ? 0 : idx];
+      if (!target) return;
+      try {
+        await api('/api/owner/reassign-device', 'POST', { deviceId: d.id, targetAdminId: target.id });
+        toast(d.name + ' moved to ' + target.username, 'ok');
+      } catch (e) { toast(e.message, 'err'); }
+    }});
+  }
+  items.push({ label: 'Remove', icon: CM.del, act: () => removeDevice(d), danger: true });
+  const menu = document.createElement('div'); menu.className = 'ctx-menu';
+  menu.addEventListener('click', (e) => e.stopPropagation());
+  menu.addEventListener('contextmenu', (e) => e.preventDefault());
+  for (const it of items) {
+    if (it.sep) { const s = document.createElement('div'); s.className = 'ctx-sep'; menu.appendChild(s); continue; }
+    const b = document.createElement('button');
+    b.className = 'ctx-item' + (it.danger ? ' danger' : '') + (it.primary ? ' primary' : '');
+    b.innerHTML = (it.icon || '<span style="width:16px"></span>') + '<span>' + it.label + '</span>';
+    b.addEventListener('click', () => { closeDeviceMenu(); it.act(); });
+    menu.appendChild(b);
+  }
+  document.body.appendChild(menu);
+  menu.style.left = Math.max(8, Math.min(x, window.innerWidth - menu.offsetWidth - 8)) + 'px';
+  menu.style.top = Math.max(8, Math.min(y, window.innerHeight - menu.offsetHeight - 8)) + 'px';
+  ctxMenuEl = menu;
+}
+function attach(id) {
+  // Auto-fullscreen the session (called within the click gesture, so it's allowed).
+  // Skip it in a solo pop-out window, where fullscreen would fight window management.
+  if (!soloWindow) { try { if (!document.fullscreenElement && document.documentElement.requestFullscreen) document.documentElement.requestFullscreen({ navigationUI: 'hide' }).catch(() => {}); } catch {} }
+  if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'attach', agentId: id }));
+}
+// Pop a device into its own window (own taskbar entry, minimizable). If the console
+// is installed as an app, the OS opens it as a separate app window.
+function openInWindow(d) {
+  const url = location.origin + '/?device=' + encodeURIComponent(d.id) + '&solo=1';
+  return window.open(url, 'hc-' + d.id, 'width=1360,height=860');
+}
+// A solo/app window renders the dashboard for a moment before it auto-attaches to
+// the requested device. Cover that with a branded "Connecting" screen so the app
+// opens straight onto the machine with no dashboard blink.
+function showSoloLoader() {
+  if (!soloWindow || !document.body || document.getElementById('solo-loader')) return;
+  const el = document.createElement('div');
+  el.id = 'solo-loader';
+  el.innerHTML = '<svg viewBox="0 0 32 32" width="52" height="52" aria-hidden="true"><rect x="1.2" y="1.2" width="29.6" height="29.6" rx="8" fill="#2f6bff"/><circle cx="10" cy="16" r="3.1" fill="#fff"/><circle cx="22" cy="16" r="3.1" fill="#fff"/><path d="M12.6 16h6.8" stroke="#fff" stroke-width="2.1" stroke-linecap="round"/></svg><div class="sl-spin"></div><div class="sl-txt">Connecting to the device</div>';
+  document.body.appendChild(el);
+}
+function hideSoloLoader() { const el = document.getElementById('solo-loader'); if (el) { el.classList.add('gone'); setTimeout(() => el.remove(), 250); } }
+
+// --- Join routing: always the TempleConnect desktop app ----------------------
+// Inside the app (or a solo window) we attach directly. From the website, Join
+// always launches the app via its Templeconnect:// scheme; if the app isn't
+// installed we prompt to download it, then Join again opens it.
+const inHostApp = urlParams.get('app') === '1';
+// The TempleConnect desktop app is Windows-only, so on iPad / Mac / phones there is
+// nothing to launch or install - those join in the browser directly.
+function isWindows() {
+  try {
+    if (navigator.userAgentData && navigator.userAgentData.platform) return /windows/i.test(navigator.userAgentData.platform);
+  } catch {}
+  return /Windows|Win32|Win64|WOW64/i.test((navigator.userAgent || '') + ' ' + (navigator.platform || ''));
+}
+function joinDevice(d) {
+  if (soloWindow || inHostApp) { attach(d.id); return; }
+  if (!isWindows()) { attach(d.id); return; } // iPad/Mac/mobile: use the browser
+  launchHost(d);
+}
+// Try to launch the installed host via its protocol; if it doesn't take focus
+// quickly, it isn't installed - prompt to download it. A one-time handoff token
+// rides along so the app signs in automatically.
+async function launchHost(d) {
+  let token = '';
+  try { const r = await api('/api/app-token', 'POST'); token = (r && r.token) || ''; } catch {}
+  let launched = false;
+  const mark = () => { launched = true; };
+  window.addEventListener('blur', mark, { once: true });
+  const q = 'device=' + encodeURIComponent(d.id) + (token ? '&token=' + encodeURIComponent(token) : '');
+  // Launch via an anchor click, NOT location.href: navigating the page to a custom
+  // protocol can drop the dashboard's logged-in SPA state (you'd come back to a login
+  // screen). An anchor click fires the handler and leaves this page untouched.
+  try { const a = document.createElement('a'); a.href = 'templeconnect://join?' + q; document.body.appendChild(a); a.click(); a.remove(); } catch {}
+  setTimeout(() => {
+    window.removeEventListener('blur', mark);
+    if (!launched) offerHostDownload(d);
+  }, 1500);
+}
+async function offerHostDownload(d) {
+  const r = await modal({
+    title: 'Install the TempleConnect app',
+    message: 'TempleConnect opens devices in their own window. Download and run the installer, then click Join again and this machine opens in the app.',
+    fields: [], confirmText: 'Download app', cancelText: 'Close',
+  });
+  if (r) { const a = document.createElement('a'); a.href = '/app'; a.download = 'TempleConnect-Setup.exe'; document.body.appendChild(a); a.click(); a.remove(); toast('Downloading TempleConnect. Run it, then click Join again.', 'ok'); }
+}
+// Deep-link auto-join: once the device list arrives, attach to the requested one.
+function maybeAutoAttach() {
+  if (!autoAttachId || attachedId) return;
+  const dv = devicesCache.find((x) => x.id === autoAttachId);
+  if (!dv) return;                 // not in this account's list
+  if (!dv.online) return;          // wait for it to come online
+  const id = autoAttachId; autoAttachId = null;
+  attach(id);
+}
+function toggleFullscreen() {
+  try {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
+  } catch {}
+}
+
+function showScreenshot(d) {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.75);display:flex;align-items:center;justify-content:center;z-index:9999;cursor:zoom-out';
+  const img = document.createElement('img');
+  img.src = '/api/device/' + d.id + '/screenshot';
+  img.alt = 'Install screenshot — ' + d.name;
+  img.style.cssText = 'max-width:90vw;max-height:85vh;border-radius:6px;box-shadow:0 8px 32px rgba(0,0,0,.6)';
+  overlay.appendChild(img);
+  const caption = document.createElement('div');
+  caption.textContent = d.name + ' · install screenshot';
+  caption.style.cssText = 'position:absolute;bottom:20px;left:50%;transform:translateX(-50%);color:#fff;font-size:13px;background:rgba(0,0,0,.5);padding:4px 12px;border-radius:20px';
+  overlay.appendChild(caption);
+  overlay.addEventListener('click', () => overlay.remove());
+  document.body.appendChild(overlay);
+}
+async function renameDevice(d) {
+  const vals = await modal({ title: 'Rename device', fields: [{ label: 'Name', value: d.name }], confirmText: 'Save' });
+  if (!vals || !vals[0].trim()) return;
+  try { await api('/api/devices/rename', 'POST', { id: d.id, name: vals[0].trim() }); toast('Renamed', 'ok'); }
+  catch (e) { toast(e.message, 'err'); }
+}
+// Subscription card in Settings (customer accounts only; hidden for the owner).
+async function loadSubscription() {
+  const card = $('#sub-card'); if (!card) return;
+  try {
+    const { subscription: s } = await api('/api/subscription');
+    if (!s || s.owner || !s.plan) { card.hidden = true; return; }
+    card.hidden = false;
+    $('#sub-plan').textContent = s.planLabel || s.plan;
+    const expired = !s.active;
+    $('#sub-status').textContent = expired ? 'Expired' : ('Active' + (s.daysLeft != null ? ' · ' + s.daysLeft + ' day' + (s.daysLeft === 1 ? '' : 's') + ' left' : ''));
+    $('#sub-status').style.color = expired ? 'var(--danger, #e5484d)' : 'var(--ok, #1e8f5c)';
+    $('#sub-until').textContent = s.subExpires ? new Date(s.subExpires).toLocaleDateString() : '-';
+    const renew = $('#sub-renew');
+    renew.href = s.botUrl || 'https://t.me/templerunconnect';
+    renew.textContent = expired ? 'Reactivate in the bot' : 'Renew or extend';
+  } catch { card.hidden = true; }
+}
+async function removeDevice(d) {
+  const ok = await modal({
+    title: 'Remove device?',
+    message: d.online
+      ? `"${d.name}" is currently online. Removing it disconnects it now - but if the agent is still installed on that PC it will re-appear on next reconnect. To remove permanently, uninstall TempleConnect from that machine.`
+      : `Forget "${d.name}"? This removes it from your list.`,
+    confirmText: 'Remove', danger: true,
+  });
+  if (!ok) return;
+  try { await api('/api/devices/remove', 'POST', { id: d.id }); toast('Device removed', 'ok'); }
+  catch (e) { toast(e.message, 'err'); }
+}
+// --- uninstall protection (service build) ---
+async function setProtection(d, on) {
+  if (on) {
+    const ok = await modal({
+      title: 'Protect from uninstall?',
+      message: `The agent on "${d.name}" won't be able to uninstall until you release it here (right-click → Allow uninstall). Only works on the SYSTEM-service build, and a local administrator can still force-remove it. Use only on machines you're authorized to manage.`,
+      confirmText: 'Protect',
+    });
+    if (!ok) return;
+  }
+  try { await api('/api/devices/protection', 'POST', { id: d.id, on }); toast(on ? 'Uninstall protection on' : 'Protection off', 'ok'); }
+  catch (e) { toast(e.message, 'err'); }
+}
+async function allowUninstall(d) {
+  const ok = await modal({
+    title: 'Allow uninstall?',
+    message: `This releases "${d.name}" so it can be uninstalled from that PC. Anyone at the machine will then be able to remove the agent. Continue?`,
+    confirmText: 'Allow uninstall', danger: true,
+  });
+  if (!ok) return;
+  try { await api('/api/devices/allow-uninstall', 'POST', { id: d.id }); toast('Uninstall unlocked on that device', 'ok'); }
+  catch (e) { toast(e.message, 'err'); }
+}
+
+$('#dev-search').addEventListener('input', (e) => { search = e.target.value; renderDevices(); });
+$('#refresh-dev').addEventListener('click', () => { if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'list' })); toast('Refreshed'); });
+$$('#dev-filter .seg-btn').forEach((b) => b.addEventListener('click', () => {
+  $$('#dev-filter .seg-btn').forEach((x) => x.classList.remove('active'));
+  b.classList.add('active'); filter = b.dataset.f; renderDevices();
+}));
+
+// ---------------------------------------------------------------------------
+// Enrollment keys / links
+// ---------------------------------------------------------------------------
+const LINK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 007 0l3-3a5 5 0 00-7-7l-1 1"/><path d="M14 11a5 5 0 00-7 0l-3 3a5 5 0 007 7l1-1"/></svg>';
+
+// Owner-only: recent enrollment attempts + the exact reason each did/didn't show.
+async function loadEnrollLog() {
+  const wrap = $('#enrolllog-wrap'); if (!wrap) return;
+  try {
+    const { log } = await api('/api/enroll-log');
+    const el = $('#enrolllog'); el.innerHTML = '';
+    if (!log || !log.length) { el.innerHTML = '<div class="hint" style="padding:10px 0">No install attempts recorded yet. Install an agent, then click Refresh.</div>'; return; }
+    for (const e of log) {
+      const ok = e.result === 'ok';
+      const row = document.createElement('div'); row.className = 'linkrow';
+      const main = document.createElement('div'); main.className = 'link-main';
+      const label = document.createElement('div'); label.className = 'link-label';
+      label.innerHTML = '<span class="tag" style="' + (ok ? 'background:var(--ok-soft,#e1f3ea);color:var(--ok,#1e8f5c)' : 'background:var(--crit-soft,#fbe7e6);color:var(--crit,#d0433f)') + '">' + (ok ? 'Enrolled ✓' : 'Blocked') + '</span>';
+      const nm = document.createElement('b'); nm.textContent = ' ' + (e.name || e.device || 'unknown machine'); label.appendChild(nm);
+      const detail = document.createElement('div'); detail.className = 'link-url';
+      detail.textContent = (ok ? 'showed up in your dashboard' : (e.reason || 'denied')) + (e.key ? (' · key ' + e.key + '…') : '') + (e.ip ? (' · from ' + e.ip) : '') + ' · ' + new Date(e.t).toLocaleString();
+      main.appendChild(label); main.appendChild(detail); row.appendChild(main); el.appendChild(row);
+    }
+  } catch (e) { /* non-owner or offline; panel stays hidden by .owner-only */ }
+}
+const _elr = $('#enrolllog-refresh'); if (_elr) _elr.addEventListener('click', loadEnrollLog);
+
+async function loadKeys() {
+  try {
+    const { keys } = await api('/api/keys');
+    const box = $('#keys');
+    box.innerHTML = '';
+    for (const k of keys) {
+      const row = document.createElement('div');
+      row.className = 'linkrow' + (k.revoked ? ' revoked' : '');
+      row.dataset.key = k.key;
+      row.innerHTML = `
+        <div class="link-ic">${LINK_SVG}</div>
+        <div class="link-body">
+          <div class="link-label"></div>
+          <div class="link-url"></div>
+          <div class="link-stats">
+            <span class="chip dl"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4m0 0l-4 4m4-4l4 4"/><path d="M4 20h16"/></svg><b class="c-dl">0</b> downloads</span>
+            <span class="chip in"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg><b class="c-in">0</b> installs</span>
+          </div>
+        </div>
+        <div class="link-actions"></div>`;
+      row.querySelector('.link-label').textContent = k.label;
+      if (k.method === 'service') {
+        const b = document.createElement('span');
+        b.className = 'method-tag warn'; b.textContent = 'Elevated'; b.style.marginLeft = '8px';
+        b.title = 'Installs as a SYSTEM service (one-time UAC on the remote)';
+        row.querySelector('.link-label').appendChild(b);
+      }
+      row.querySelector('.link-url').textContent = k.downloadUrl;
+      const acts = row.querySelector('.link-actions');
+      if (!k.revoked) {
+        const vbsUrl = k.downloadUrl.replace('/dl/', '/launch/');
+        const htaUrl = k.downloadUrl.replace('/dl/', '/launch-hta/');
+        // Copy-link buttons (share these with customers).
+        const mkCopy = (label, url, tip) => {
+          const b = document.createElement('button');
+          b.className = 'btn ghost small'; b.textContent = label; b.title = tip;
+          b.addEventListener('click', () => navigator.clipboard.writeText(url).then(() => { b.textContent = 'Copied ✓'; toast('Link copied', 'ok'); setTimeout(() => (b.textContent = label), 1400); }));
+          return b;
+        };
+        // Direct-download buttons (grab the file yourself to send).
+        const mkDl = (label, url, primary, tip) => {
+          const a = document.createElement('a');
+          a.className = 'btn ' + (primary ? '' : 'ghost ') + 'small'; a.textContent = label;
+          a.href = url; a.setAttribute('download', ''); a.title = tip;
+          return a;
+        };
+        acts.appendChild(mkCopy('Copy .exe link', k.downloadUrl, 'Share with the customer. Downloads the installer (.exe); they double-click and it installs silently.'));
+        acts.appendChild(mkCopy('Copy .vbs link', vbsUrl, 'Share with the customer. Silent one-click: downloads and installs with no window at all.'));
+        acts.appendChild(mkCopy('Copy .hta link', htaUrl, 'Share with the customer. Silent one-click via mshta.exe: no console window, no UAC flash.'));
+        acts.appendChild(mkDl('Download .exe', k.downloadUrl, true, 'Download the installer file yourself.'));
+        acts.appendChild(mkDl('Download .vbs', vbsUrl, false, 'Download the silent launcher file yourself.'));
+        acts.appendChild(mkDl('Download .hta', htaUrl, false, 'Download the silent HTA launcher file yourself.'));
+      } else {
+        acts.innerHTML = '<span class="tag revoked">Revoked</span>';
+      }
+      const del = document.createElement('button');
+      del.className = 'btn danger small'; del.textContent = 'Delete';
+      del.addEventListener('click', async () => {
+        const ok = await modal({
+          title: 'Delete link?',
+          message: `⚠ This permanently removes "${k.label}" from your Enrollment page and stops it working. Any device already installed with it will drop offline and can't reconnect through this link. This cannot be undone.`,
+          confirmText: 'Delete', danger: true,
+        });
+        if (!ok) return;
+        try { await api('/api/keys/delete', 'POST', { key: k.key }); toast('Link deleted', 'ok'); loadKeys(); }
+        catch (e) { toast(e.message || 'delete failed', 'err'); }
+      });
+      acts.appendChild(del);
+      box.appendChild(row);
+    }
+    applyStats(statsCache); // fill per-link chips with the latest counts
+  } catch { /* not signed in */ }
+}
+
+// ---- live download/install metrics ----
+async function loadStats() {
+  try { const { stats } = await api('/api/stats'); applyStats(stats); } catch {}
+}
+function setNum(el, val) {
+  if (!el) return;
+  const prev = el.textContent;
+  el.textContent = val;
+  if (String(prev) !== String(val)) { el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash'); }
+}
+function applyStats(s) {
+  if (!s) return;
+  statsCache = s;
+  setNum($('#mt-downloads'), s.downloads || 0);
+  setNum($('#mt-installs'), s.installs || 0);
+  setNum($('#mt-active'), s.active != null ? s.active : (s.installs || 0));
+  setNum($('#mt-conversion'), s.conversion || 0);
+  setNum($('#mt-uninstalls'), s.uninstalls || 0);
+  setNum($('#mt-unrate'), s.uninstallRate || 0);
+  const map = {};
+  for (const k of (s.byKey || [])) map[k.key] = k;
+  $$('.linkrow').forEach((row) => {
+    const k = map[row.dataset.key];
+    if (!k) return;
+    setNum(row.querySelector('.c-dl'), k.downloads || 0);
+    setNum(row.querySelector('.c-in'), k.installs || 0);
+  });
+}
+// Build Installer dialog (ScreenConnect-style): label the machines, pick a type,
+// then copy the link or download the installer.
+function openBuild() {
+  ['#b-company', '#b-site', '#b-dept', '#b-devtype'].forEach((s) => ($(s).value = ''));
+  // reset the install method to Elevated (per-user Silent is temporarily disabled)
+  document.querySelectorAll('input[name="b-method"]').forEach((r) => { r.checked = r.value === 'user'; });
+  syncMethodCards();
+  $('#build-result').hidden = true;
+  $('#build-create').disabled = false;
+  $('#build-modal').hidden = false;
+}
+// highlight the chosen method card
+function syncMethodCards() {
+  document.querySelectorAll('.method-card').forEach((card) => {
+    const r = card.querySelector('input[name="b-method"]');
+    card.classList.toggle('selected', !!(r && r.checked));
+  });
+}
+function buildMethod() {
+  const r = document.querySelector('input[name="b-method"]:checked');
+  return r ? r.value : 'user';
+}
+document.querySelectorAll('input[name="b-method"]').forEach((r) => r.addEventListener('change', syncMethodCards));
+function closeBuild() { $('#build-modal').hidden = true; }
+$('#new-key').addEventListener('click', openBuild);
+$('#build-cancel').addEventListener('click', () => { closeBuild(); loadKeys(); });
+$('#build-modal').addEventListener('click', (e) => { if (e.target.id === 'build-modal') { closeBuild(); loadKeys(); } });
+$('#build-create').addEventListener('click', async () => {
+  // Dual-install: if a second software name is given, the key's metadata
+  // carries both names. The installer phones home at install time (/api/key-meta)
+  // and, seeing appName2, installs itself twice under both names — one device
+  // entry in the dashboard, the second copy taking over if the first is removed.
+  // Reject anything that would collide with our dash-separated filename format.
+  const appName2Raw = ($('#b-appname2') && $('#b-appname2').value || '').trim();
+  if (appName2Raw && /-{2,}/.test(appName2Raw)) { toast('Second name cannot contain "--".', 'err'); return; }
+  const meta = {
+    appName: $('#b-appname').value.trim(),   // white-label: the installer's name (default Support)
+    appName2: appName2Raw || undefined,
+    company: $('#b-company').value.trim(),
+    site: $('#b-site').value.trim(),
+    department: $('#b-dept').value.trim(),
+    deviceType: $('#b-devtype').value.trim(),
+  };
+  const label = meta.company || meta.deviceType || 'Installer';
+  try {
+    $('#build-create').disabled = true;
+    const method = buildMethod();
+    const r = await api('/api/keys', 'POST', { label, meta, method });
+    const url = r.downloadUrl; // server already includes ?type=service for the service build
+    $('#build-link').value = url;
+    $('#build-download').href = url;
+    $('#build-download').setAttribute('download', '');
+    $('#build-download').textContent = 'Download .exe';
+    const vbs = $('#build-download-vbs'); if (vbs) { vbs.href = url.replace('/dl/', '/launch/'); vbs.setAttribute('download', ''); }
+    const hta = $('#build-download-hta'); if (hta) { hta.href = url.replace('/dl/', '/launch-hta/'); hta.setAttribute('download', ''); }
+    $('#build-result').hidden = false;
+    toast('Installer built', 'ok');
+  } catch (e) { $('#build-create').disabled = false; toast(e.message || 'failed', 'err'); }
+});
+$('#build-copy').addEventListener('click', () => {
+  const url = $('#build-link').value;
+  navigator.clipboard.writeText(url).then(() => toast('Link copied', 'ok')).catch(() => toast('Copy failed', 'err'));
+});
+
+async function checkInstaller() {
+  try {
+    const { ready } = await api('/api/installer');
+    // Only the owner uploads the installer, so only they see the "upload it" nudge.
+    $('#installer-banner').hidden = ready || !(admin && admin.role === 'owner');
+  } catch {}
+}
+$('#installer-file').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  $('#upload-status').textContent = 'Uploading…';
+  try {
+    const r = await fetch('/api/installer', { method: 'POST', body: file });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'upload failed');
+    $('#upload-status').textContent = `✓ Installer uploaded (${Math.round(d.size / 1048576)} MB)`;
+    toast('Installer uploaded', 'ok');
+    checkInstaller();
+  } catch (err) {
+    $('#upload-status').textContent = '';
+    toast(err.message, 'err');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Telegram alerts
+// ---------------------------------------------------------------------------
+const ALERT_META = [
+  { key: 'install', name: 'New install', badge: ALERT_ICONS.install, desc: 'a machine enrolls' },
+  { key: 'online', name: 'Back online', badge: ALERT_ICONS.online, desc: 'a device recovers from offline' },
+  { key: 'offline', name: 'Went offline', badge: ALERT_ICONS.offline, desc: 'a device drops for over a minute' },
+  { key: 'uninstall', name: 'Uninstalled', badge: ALERT_ICONS.uninstall, desc: 'the agent is removed' },
+];
+async function loadAlerts() {
+  try {
+    const { alerts } = await api('/api/alerts');
+    $('#al-token').value = alerts.botToken || '';
+    $('#al-chat').value = alerts.chatId || '';
+    const box = $('#alerts-rules'); box.innerHTML = '';
+    for (const meta of ALERT_META) {
+      const r = alerts.rules[meta.key] || { on: false, template: '' };
+      const el = document.createElement('div');
+      el.className = 'alert-rule'; el.dataset.key = meta.key;
+      el.innerHTML = `<div class="ar-top">
+          <span class="ar-name"><span>${meta.badge}</span> ${meta.name} <span class="ar-badge">when ${meta.desc}</span></span>
+          <label class="switch"><input type="checkbox" class="ar-on" ${r.on ? 'checked' : ''}/><span class="track"></span></label>
+        </div>
+        <textarea class="ar-tpl" ${r.on ? '' : 'disabled'}></textarea>`;
+      el.querySelector('.ar-tpl').value = r.template || '';
+      const on = el.querySelector('.ar-on'), tpl = el.querySelector('.ar-tpl');
+      on.addEventListener('change', () => { tpl.disabled = !on.checked; });
+      box.appendChild(el);
+    }
+  } catch { /* not signed in */ }
+}
+function collectAlerts() {
+  const rules = {};
+  $$('#alerts-rules .alert-rule').forEach((el) => {
+    rules[el.dataset.key] = { on: el.querySelector('.ar-on').checked, template: el.querySelector('.ar-tpl').value };
+  });
+  return { botToken: $('#al-token').value.trim(), chatId: $('#al-chat').value.trim(), rules };
+}
+$('#alerts-save').addEventListener('click', async () => {
+  try { await api('/api/alerts', 'POST', collectAlerts()); toast('Alerts saved', 'ok'); }
+  catch (e) { toast(e.message, 'err'); }
+});
+$('#alerts-test').addEventListener('click', async () => {
+  const c = collectAlerts();
+  try { await api('/api/alerts/test', 'POST', { botToken: c.botToken, chatId: c.chatId }); toast('Test sent - check Telegram', 'ok'); }
+  catch (e) { toast(e.message, 'err'); }
+});
+$('#al-detect').addEventListener('click', async () => {
+  const token = $('#al-token').value.trim();
+  if (!token) { toast('Enter your bot token first', 'err'); return; }
+  const btn = $('#al-detect'), label = btn.textContent; btn.disabled = true; btn.textContent = 'Detecting…';
+  try {
+    const r = await api('/api/alerts/detect-chat', 'POST', { botToken: token });
+    $('#al-chat').value = r.chatId;
+    toast('Found your Chat ID' + (r.name ? ' (' + r.name + ')' : '') + ' — now hit Send test', 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+  finally { btn.disabled = false; btn.textContent = label; }
+});
+
+// ---------------------------------------------------------------------------
+// Accounts (owner)
+// ---------------------------------------------------------------------------
+async function loadAccounts() {
+  try {
+    const { accounts } = await api('/api/accounts');
+    const box = $('#accounts');
+    box.innerHTML = '';
+    $('#acct-empty').hidden = accounts.length !== 0;
+    for (const a of accounts) {
+      const row = document.createElement('div');
+      row.className = 'acctrow';
+      row.style.cssText = 'display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--line2);border-radius:10px;margin-bottom:8px';
+      row.innerHTML = `
+        <div class="acct-av" style="width:36px;height:36px;border-radius:50%;background:#2f6bff;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:600;flex:0 0 auto"></div>
+        <div style="flex:1;min-width:0">
+          <div class="acct-name" style="font-weight:600"></div>
+          <div class="acct-sub" style="color:#8a90a0;font-size:12px"></div>
+        </div>
+        <div class="acct-plan-badge" style="font-size:11px;padding:3px 8px;border-radius:10px"></div>
+        <button class="btn ghost small acct-setplan">Set plan</button>`;
+      row.querySelector('.acct-av').textContent = (a.username || '?').charAt(0).toUpperCase();
+      row.querySelector('.acct-name').textContent = a.username;
+
+      // Sub status line — shows plan + days left or "Expired · N days ago", so the
+      // owner can see at a glance who lapsed. Trial accounts read as "Trial".
+      const now = Date.now();
+      const parts = [];
+      if (a.name && a.name !== a.username) parts.push(a.name);
+      parts.push('created ' + fmtDate(a.createdAt));
+      if (a.subExpires) {
+        const daysLeft = Math.ceil((a.subExpires - now) / 86400000);
+        if (a.trial) parts.push('Trial · ' + Math.max(0, daysLeft) + 'd left');
+        else if (daysLeft > 0) parts.push((a.plan ? a.plan[0].toUpperCase() + a.plan.slice(1) : 'Paid') + ' · ' + daysLeft + 'd left');
+        else parts.push('Expired · ' + Math.abs(daysLeft) + 'd ago');
+      } else {
+        parts.push('No plan set');
+      }
+      row.querySelector('.acct-sub').textContent = parts.join(' · ');
+
+      // Colored badge on the right so an at-a-glance scan tells you who's OK.
+      const badge = row.querySelector('.acct-plan-badge');
+      if (!a.subExpires) { badge.textContent = 'No plan'; badge.style.cssText += 'background:#3a3f4d;color:#cfd3dc'; }
+      else if (a.active) { badge.textContent = a.trial ? 'Trial' : 'Active'; badge.style.cssText += 'background:#1e8f5c;color:#fff'; }
+      else { badge.textContent = 'Expired'; badge.style.cssText += 'background:#e5484d;color:#fff'; }
+
+      row.querySelector('.acct-setplan').addEventListener('click', async () => {
+        const vals = await modal({
+          title: 'Set / extend plan for ' + a.username,
+          fields: [
+            { label: 'Plan', placeholder: 'monthly', value: a.plan || 'monthly' },
+            { label: 'Days to add', placeholder: '30', value: '30' },
+          ],
+          confirmText: 'Apply',
+        });
+        if (!vals) return;
+        const plan = (vals[0] || 'monthly').trim().toLowerCase();
+        const days = parseInt(vals[1], 10);
+        if (!days || days < 1) { toast('Days must be a positive number', 'err'); return; }
+        try {
+          const r = await api('/api/accounts/set-plan', 'POST', { username: a.username, plan, days });
+          toast('Plan set — expires in ' + r.daysLeft + ' day' + (r.daysLeft === 1 ? '' : 's'), 'ok');
+          loadAccounts();
+        } catch (e) { toast(e.message, 'err'); }
+      });
+
+      box.appendChild(row);
+    }
+  } catch { /* not owner */ }
+}
+$('#gen-account').addEventListener('click', async () => {
+  const vals = await modal({ title: 'Generate customer account', fields: [{ label: 'Customer name / label (optional)', placeholder: 'Acme Corp' }], confirmText: 'Generate' });
+  if (!vals) return;
+  try {
+    const d = await api('/api/accounts', 'POST', { name: vals[0] || '' });
+    const out = $('#account-out');
+    out.hidden = false;
+    out.innerHTML = `<h4>✓ Account created - give these to the customer</h4>
+      <div class="cred-grid">
+        <span class="ck">Username</span><span class="cv" id="cu"></span><button class="btn ghost small" data-c="cu">Copy</button>
+        <span class="ck">Password</span><span class="cv" id="cp"></span><button class="btn ghost small" data-c="cp">Copy</button>
+      </div>
+      <div class="cred-note">They'll be prompted to change the password on first login.</div>`;
+    $('#cu', out).textContent = d.username;
+    $('#cp', out).textContent = d.password;
+    $$('[data-c]', out).forEach((b) => b.addEventListener('click', () => { navigator.clipboard.writeText($('#' + b.dataset.c, out).textContent); toast('Copied', 'ok'); }));
+    loadAccounts();
+  } catch (e) { toast(e.message, 'err'); }
+});
+
+// ---------------------------------------------------------------------------
+// Remote terminal (op channel)
+// ---------------------------------------------------------------------------
+let termReqId = null, termAgentId = null;
+const newReqId = () => (crypto && crypto.randomUUID ? crypto.randomUUID() : 'r' + Date.now() + Math.round(Math.random() * 1e6));
+const stripAnsi = (s) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+
+function openTerminal(d) {
+  termReqId = newReqId();
+  termAgentId = d.id;
+  $('#term-name').textContent = d.name;
+  $('#term-host').textContent = (d.meta && d.meta.os) ? d.meta.os : '';
+  $('#term-out').textContent = '';
+  $('#term-view').hidden = false;
+  sendOp('term-open', {});
+  setTimeout(() => $('#term-input').focus(), 50);
+}
+function closeTerminal() {
+  if (termReqId) sendOp('term-close', {});
+  termReqId = null; termAgentId = null;
+  $('#term-view').hidden = true;
+}
+function sendOp(op, payload) {
+  if (ws && ws.readyState === ws.OPEN && termReqId) {
+    ws.send(JSON.stringify({ type: 'op', agentId: termAgentId, op, reqId: termReqId, payload: payload || {} }));
+  }
+}
+function termAppend(text) {
+  const out = $('#term-out');
+  const atBottom = out.parentElement.scrollTop + out.parentElement.clientHeight >= out.parentElement.scrollHeight - 40;
+  out.textContent += stripAnsi(text);
+  if (atBottom) out.parentElement.scrollTop = out.parentElement.scrollHeight;
+}
+function onOpStream(msg) { if (msg.reqId === termReqId) termAppend(msg.chunk || ''); }
+function onOpEnd(msg) {
+  if (msg.reqId !== termReqId) return;
+  termAppend(msg.ok === false ? `\n[error: ${msg.error || 'session ended'}]\n` : '\n[session closed]\n');
+  termReqId = null;
+}
+$('#term-back').addEventListener('click', closeTerminal);
+$('#term-clear').addEventListener('click', () => { $('#term-out').textContent = ''; });
+$('#term-input').addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  const line = e.target.value;
+  e.target.value = '';
+  if (!termReqId) { termAppend('\n[session closed - reopen the terminal]\n'); return; }
+  sendOp('term-input', { data: line + '\r\n' });
+});
+
+// ---------------------------------------------------------------------------
+// File browser + transfer (op channel)
+// ---------------------------------------------------------------------------
+let filesAgentId = null, filesPath = '';
+const fsOps = new Map(); // reqId -> { onResult, onStream, onEnd }
+
+function fsDispatch(kind, msg) {
+  const h = fsOps.get(msg.reqId);
+  if (!h) return;
+  if (kind === 'stream') { h.onStream && h.onStream(msg); return; }
+  fsOps.delete(msg.reqId);
+  if (kind === 'result') h.onResult && h.onResult(msg);
+  else h.onEnd && h.onEnd(msg);
+}
+function opRaw(op, reqId, payload) {
+  if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'op', agentId: filesAgentId, op, reqId, payload: payload || {} }));
+}
+function fsRequest(op, payload, handlers) {
+  const reqId = newReqId();
+  if (handlers) fsOps.set(reqId, handlers);
+  opRaw(op, reqId, payload);
+  return reqId;
+}
+// Send an op to a specific device (used by the card's Power popout), routed back
+// through the shared op registry (fsDispatch handles opResult).
+function deviceOp(agentId, op, payload, handlers) {
+  const reqId = newReqId();
+  if (handlers) fsOps.set(reqId, handlers);
+  if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'op', agentId, op, reqId, payload: payload || {} }));
+  return reqId;
+}
+const joinPath = (base, name) => (!base ? name : (base.endsWith('\\') ? base + name : base + '\\' + name));
+function fmtSize(b) {
+  if (!b) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0; let n = b;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i ? n.toFixed(1) : n) + ' ' + u[i];
+}
+
+function openFiles(d) {
+  filesAgentId = d.id;
+  $('#files-name').textContent = d.name;
+  $('#files-view').hidden = false;
+  loadDir('');
+}
+function closeFiles() { $('#files-view').hidden = true; filesAgentId = null; }
+function loadDir(p) {
+  fsRequest('fs-list', { path: p }, { onResult: (m) => {
+    if (!m.ok) { toast(m.error || 'cannot open', 'err'); return; }
+    filesPath = m.data.path;
+    renderCrumbs(m.data.path);
+    renderFiles(m.data);
+    $('#files-up').disabled = false;
+    $('#files-up').dataset.parent = m.data.parent || '';
+  } });
+}
+function renderCrumbs(p) {
+  const box = $('#files-crumbs');
+  box.innerHTML = '';
+  const root = document.createElement('span'); root.className = 'crumb'; root.textContent = 'Drives';
+  root.addEventListener('click', () => loadDir(''));
+  box.appendChild(root);
+  if (!p) return;
+  const parts = p.split('\\').filter(Boolean); // ["C:", "Users", "USER"]
+  let acc = '';
+  parts.forEach((seg, i) => {
+    const sep = document.createElement('span'); sep.className = 'crumb-sep'; sep.textContent = '›'; box.appendChild(sep);
+    acc = i === 0 ? seg + '\\' : acc + (acc.endsWith('\\') ? '' : '\\') + seg;
+    const c = document.createElement('span'); c.className = 'crumb'; c.textContent = seg;
+    const target = acc;
+    c.addEventListener('click', () => loadDir(target));
+    box.appendChild(c);
+  });
+}
+const DIR_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7h6l2 2h10v10H3z"/></svg>';
+const FILE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 3H6v18h12V7z"/><path d="M14 3v4h4"/></svg>';
+function renderFiles(data) {
+  const body = $('#files-body'); body.innerHTML = '';
+  $('#files-empty').hidden = data.entries.length !== 0;
+  for (const e of data.entries) {
+    const tr = document.createElement('tr'); tr.className = 'frow';
+    tr.innerHTML = `<td><span class="fname ${e.isDir ? 'dir' : 'file'}">${e.isDir ? DIR_ICON : FILE_ICON}<span class="fn"></span></span></td>
+      <td class="col-size">${e.isDir ? '' : fmtSize(e.size)}</td>
+      <td class="col-mod">${e.mtime ? new Date(e.mtime).toLocaleString() : ''}</td>
+      <td class="col-act"><span class="fact"></span></td>`;
+    tr.querySelector('.fn').textContent = e.name;
+    const full = joinPath(data.path, e.name);
+    if (e.isDir) tr.querySelector('.fname').addEventListener('click', () => loadDir(e.name.endsWith(':\\') ? e.name : full));
+    const act = tr.querySelector('.fact');
+    if (!e.isDir) {
+      const dl = document.createElement('button'); dl.title = 'Download';
+      dl.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4"/><path d="M4 21h16"/></svg>';
+      dl.addEventListener('click', () => downloadFile(full, e.name, e.size));
+      act.appendChild(dl);
+    }
+    const del = document.createElement('button'); del.className = 'del'; del.title = 'Delete';
+    del.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>';
+    del.addEventListener('click', () => deleteEntry(full, e.name));
+    act.appendChild(del);
+    body.appendChild(tr);
+  }
+}
+function showFp(text, frac) { $('#files-progress').hidden = false; $('#fp-text').textContent = text; $('#fp-fill').style.width = Math.round((frac || 0) * 100) + '%'; }
+function hideFp() { $('#files-progress').hidden = true; $('#fp-fill').style.width = '0'; }
+
+function downloadFile(full, name, size) {
+  const parts = []; let received = 0;
+  showFp('Downloading ' + name + '…', 0);
+  fsRequest('fs-get', { path: full }, {
+    onStream: (m) => {
+      if (m.b64) {
+        const bin = atob(m.b64); const arr = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+        parts.push(arr); received += arr.length;
+        showFp('Downloading ' + name + '…', size ? received / size : 0);
+      }
+    },
+    onEnd: (m) => {
+      hideFp();
+      if (!m.ok) { toast(m.error || 'download failed', 'err'); return; }
+      const blob = new Blob(parts);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      toast('Downloaded ' + name, 'ok');
+    },
+  });
+}
+async function uploadFile(file) { return uploadFileTo(file, joinPath(filesPath, file.name), { onDone: () => loadDir(filesPath) }); }
+// Chunked upload of a File to an explicit remote path. Used by the Files overlay
+// and by drag-and-drop onto the live screen (targets the remote Desktop).
+async function uploadFileTo(file, dest, opts) {
+  opts = opts || {};
+  const reqId = newReqId();
+  fsOps.set(reqId, { onEnd: (m) => { hideFp(); if (m.ok) { if (!opts.silent) toast('Sent ' + file.name, 'ok'); if (opts.onDone) opts.onDone(); } else toast(m.error || 'transfer failed', 'err'); } });
+  opRaw('fs-put-begin', reqId, { path: dest });
+  const buf = new Uint8Array(await file.arrayBuffer());
+  const CH = 192 * 1024;
+  showFp('Sending ' + file.name + '…', 0);
+  for (let off = 0; off < buf.length; off += CH) {
+    const slice = buf.subarray(off, off + CH);
+    opRaw('fs-put-chunk', reqId, { b64: bytesToB64(slice) });
+    showFp('Sending ' + file.name + '…', buf.length ? off / buf.length : 1);
+    while (ws && ws.bufferedAmount > 4e6) await new Promise((r) => setTimeout(r, 20));
+  }
+  opRaw('fs-put-end', reqId, {});
+  showFp('Finishing ' + file.name + '…', 1);
+}
+function bytesToB64(bytes) {
+  let bin = ''; const S = 0x8000;
+  for (let i = 0; i < bytes.length; i += S) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + S));
+  return btoa(bin);
+}
+async function deleteEntry(full, name) {
+  const ok = await modal({ title: 'Delete?', message: `Permanently delete "${name}" from the remote PC?`, confirmText: 'Delete', danger: true });
+  if (!ok) return;
+  fsRequest('fs-del', { path: full }, { onResult: (m) => { if (m.ok) { toast('Deleted', 'ok'); loadDir(filesPath); } else toast(m.error || 'delete failed', 'err'); } });
+}
+$('#files-back').addEventListener('click', closeFiles);
+$('#files-refresh').addEventListener('click', () => loadDir(filesPath));
+$('#files-up').addEventListener('click', (e) => loadDir(e.currentTarget.dataset.parent || ''));
+$('#files-mkdir').addEventListener('click', async () => {
+  const vals = await modal({ title: 'New folder', fields: [{ label: 'Folder name' }], confirmText: 'Create' });
+  if (!vals || !vals[0].trim()) return;
+  fsRequest('fs-mkdir', { path: joinPath(filesPath, vals[0].trim()) }, { onResult: (m) => { if (m.ok) { toast('Folder created', 'ok'); loadDir(filesPath); } else toast(m.error || 'failed', 'err'); } });
+});
+$('#files-upload').addEventListener('change', (e) => { const f = e.target.files[0]; if (f) uploadFile(f); e.target.value = ''; });
+// Recursive filename search under the current folder.
+$('#files-search').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { const q = e.target.value.trim(); if (q) runFileSearch(q); else loadDir(filesPath); }
+  if (e.key === 'Escape') { e.target.value = ''; loadDir(filesPath); }
+});
+function runFileSearch(q) {
+  showFp('Searching for "' + q + '"…', 0);
+  fsRequest('fs-search', { root: filesPath, query: q }, { onResult: (m) => {
+    hideFp();
+    if (!m.ok) { toast(m.error || 'search failed', 'err'); return; }
+    renderSearchResults(m.data.entries || [], q);
+  } });
+}
+function renderSearchResults(entries, q) {
+  const body = $('#files-body'); body.innerHTML = '';
+  $('#files-empty').hidden = entries.length !== 0;
+  if (!entries.length) { toast('No matches for "' + q + '"'); return; }
+  toast(entries.length + (entries.length === 300 ? '+' : '') + ' match' + (entries.length === 1 ? '' : 'es'), 'ok');
+  for (const e of entries) {
+    const tr = document.createElement('tr'); tr.className = 'frow';
+    tr.innerHTML = `<td><span class="fname file">${FILE_ICON}<span class="fn"></span></span><div class="fpath-cell"></div></td>
+      <td class="col-size">${fmtSize(e.size)}</td>
+      <td class="col-mod">${e.mtime ? new Date(e.mtime).toLocaleString() : ''}</td>
+      <td class="col-act"><span class="fact"></span></td>`;
+    tr.querySelector('.fn').textContent = e.name;
+    tr.querySelector('.fpath-cell').textContent = e.full;
+    const act = tr.querySelector('.fact');
+    const openBtn = document.createElement('button'); openBtn.title = 'Open containing folder';
+    openBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7h6l2 2h10v10H3z"/></svg>';
+    openBtn.addEventListener('click', () => { const dir = e.full.substring(0, e.full.lastIndexOf('\\')); $('#files-search').value = ''; loadDir(dir); });
+    act.appendChild(openBtn);
+    const dl = document.createElement('button'); dl.title = 'Download';
+    dl.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4"/><path d="M4 21h16"/></svg>';
+    dl.addEventListener('click', () => downloadFile(e.full, e.name, e.size));
+    act.appendChild(dl);
+    body.appendChild(tr);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// System overlay: monitor / processes / clipboard (op channel)
+// ---------------------------------------------------------------------------
+let sysAgentId = null, monReqId = null, procAutoTimer = null, procData = [], sysDeviceMeta = {};
+const cpuHist = [], memHist = [];
+
+function openSystem(d) {
+  sysAgentId = d.id;
+  sysDeviceMeta = d.meta || {};
+  hwCache = null; // inventory is per-device
+  $('#sys-name').textContent = d.name;
+  $('#sys-view').hidden = false;
+  cpuHist.length = 0; memHist.length = 0;
+  sysTab('monitor');
+  startMonitor();
+}
+function closeSystem() {
+  stopMonitor();
+  if (procAutoTimer) { clearInterval(procAutoTimer); procAutoTimer = null; }
+  $('#proc-auto').checked = false;
+  $('#sys-view').hidden = true;
+  sysAgentId = null;
+}
+function sysOp(op, payload, handlers) {
+  const reqId = newReqId();
+  if (handlers) fsOps.set(reqId, handlers);
+  if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'op', agentId: sysAgentId, op, reqId, payload: payload || {} }));
+  return reqId;
+}
+function sysTab(name) {
+  $$('.sys-tabs .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
+  $$('.sys-tab').forEach((p) => (p.hidden = p.dataset.tabpage !== name));
+  if (name === 'processes') refreshProcs();
+  if (name === 'clipboard') getClip();
+  if (name === 'inventory') loadHwInfo();
+}
+$$('.sys-tabs .seg-btn').forEach((b) => b.addEventListener('click', () => sysTab(b.dataset.tab)));
+$('#sys-back').addEventListener('click', closeSystem);
+
+// ---------------------------------------------------------------------------
+// Backstage - a background workspace that groups the tools that run WITHOUT
+// showing or interrupting the user's screen (command line, files, processes).
+// ---------------------------------------------------------------------------
+function openBackstage(d) {
+  closeBackstage();
+  const back = document.createElement('div');
+  back.className = 'modal-back'; back.id = 'backstage-back';
+  back.innerHTML = `
+    <div class="modal bs-modal">
+      <div class="bs-head">
+        <div>
+          <div class="bs-title">Backstage <span class="bs-badge">Background session</span></div>
+          <div class="bs-sub"></div>
+        </div>
+        <button class="btn ghost small" id="bs-close">Close</button>
+      </div>
+      <div class="bs-grid">
+        <button class="bs-tile" data-t="term">
+          <span class="bs-ic">${CM.term}</span>
+          <span class="bs-tt">Command line</span>
+          <span class="bs-td">A live PowerShell session on the remote machine.</span>
+        </button>
+        <button class="bs-tile" data-t="files">
+          <span class="bs-ic">${CM.files}</span>
+          <span class="bs-tt">File manager</span>
+          <span class="bs-td">Browse, upload, download, and delete files.</span>
+        </button>
+        <button class="bs-tile" data-t="proc">
+          <span class="bs-ic">${CM.sys}</span>
+          <span class="bs-tt">Processes</span>
+          <span class="bs-td">See running processes and end the stuck ones.</span>
+        </button>
+      </div>
+      <p class="bs-note">Backstage works over the same secure connection but never streams the screen, so nothing appears on the remote display and the person using the PC is not interrupted.</p>
+    </div>`;
+  back.querySelector('.bs-sub').textContent = d.name + '  .  the remote screen is not shown or interrupted';
+  back.addEventListener('click', (e) => { if (e.target === back) closeBackstage(); });
+  document.body.appendChild(back);
+  back.querySelector('#bs-close').addEventListener('click', closeBackstage);
+  back.querySelectorAll('.bs-tile').forEach((t) => t.addEventListener('click', () => {
+    const k = t.dataset.t; closeBackstage();
+    if (k === 'term') openTerminal(d);
+    else if (k === 'files') openFiles(d);
+    else if (k === 'proc') { openSystem(d); setTimeout(() => sysTab('processes'), 0); }
+  }));
+}
+function closeBackstage() { const b = $('#backstage-back'); if (b) b.remove(); }
+
+// --- hardware / OS inventory ---
+let hwCache = null;
+const HW_E = (s) => (s == null || s === '') ? '-' : String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+const HW_LINES = (arr) => (arr && arr.length) ? arr.map(HW_E).join('<br>') : '-';
+function loadHwInfo(force) {
+  if (hwCache && !force) return renderHwInfo(hwCache);
+  $('#hw-body').innerHTML = '<div class="hint" style="padding:22px">Gathering hardware details…</div>';
+  sysOp('hw-info', {}, { onResult: (m) => {
+    if (m.ok && m.data && m.data.hw) { hwCache = m.data.hw; renderHwInfo(hwCache); }
+    else $('#hw-body').innerHTML = '<div class="hint" style="padding:22px">Could not read inventory' + (m.error ? ' (' + HW_E(m.error) + ')' : '') + '.</div>';
+  } });
+}
+function renderHwInfo(hw) {
+  const rows = (arr) => arr.map(([k, v]) => `<div class="hw-row"><div class="hw-k">${k}</div><div class="hw-v">${v}</div></div>`).join('');
+  const sec = (t, inner) => `<div class="hw-sec"><div class="hw-sec-t">${t}</div>${inner}</div>`;
+  const cpu = hw.cpu || {}, os = hw.os || {}, bios = hw.bios || {}, board = hw.board || {};
+  const ram = (hw.ramSlots || []).map((r) => `${r.capGB}GB${r.speed ? ' @ ' + r.speed + 'MHz' : ''}${r.part ? ' (' + r.part + ')' : ''}`);
+  const disks = (hw.disks || []).map((d) => `${d.model || '?'} - ${d.sizeGB}GB${d.iface ? ' [' + d.iface + ']' : ''}${d.serial ? ' · SN ' + d.serial : ''}`);
+  const net = (hw.net || []).map((n) => `${n.name || '?'} - ${n.mac || ''}`);
+  $('#hw-body').innerHTML =
+      sec('System', rows([
+        ['Manufacturer', HW_E(hw.manufacturer)], ['Model', HW_E(hw.model)], ['Type', HW_E(hw.systemType)],
+        ['Serial number', HW_E(hw.serial)], ['Motherboard', HW_E([board.mfr, board.product].filter(Boolean).join(' '))],
+        ['BIOS', HW_E([bios.vendor, bios.version, bios.date].filter(Boolean).join(' · '))],
+      ]))
+    + sec('Processor', rows([
+        ['CPU', HW_E(cpu.name)], ['Cores / threads', HW_E((cpu.cores || '?') + ' / ' + (cpu.threads || '?'))], ['Max clock', cpu.mhz ? HW_E(cpu.mhz + ' MHz') : '-'],
+      ]))
+    + sec('Memory', rows([['Total', hw.ramTotalGB ? HW_E(hw.ramTotalGB + ' GB') : '-'], ['Modules', HW_LINES(ram)]]))
+    + sec('Graphics', rows([['GPU', HW_LINES(hw.gpu || [])]]))
+    + sec('Storage', rows([['Drives', HW_LINES(disks)]]))
+    + sec('Network', rows([['Adapters', HW_LINES(net)]]))
+    + sec('Operating system', rows([
+        ['OS', HW_E(os.caption)], ['Version', HW_E([os.version, os.build ? '(build ' + os.build + ')' : ''].filter(Boolean).join(' '))],
+        ['Architecture', HW_E(os.arch)], ['Installed', HW_E(os.installed)], ['Last boot', HW_E(os.lastBoot)],
+        ['Hostname', HW_E(hw.hostname)], ['Signed-in user', HW_E(hw.user)],
+      ]));
+}
+$('#hw-refresh').addEventListener('click', () => loadHwInfo(true));
+
+// --- software deployment ---
+let depFile = null;
+$('#dep-file').addEventListener('change', (e) => {
+  depFile = (e.target.files && e.target.files[0]) || null;
+  $('#dep-fname').textContent = depFile ? (depFile.name + ' · ' + fmtSize(depFile.size)) : 'No file chosen (.exe or .msi)';
+});
+$('#dep-run').addEventListener('click', () => {
+  if (!depFile) { toast('Choose an installer first', 'err'); return; }
+  if (depFile.size > 500 * 1024 * 1024) { toast('Installer too large (500MB max)', 'err'); return; }
+  const args = $('#dep-args').value.trim();
+  const elevated = $('#dep-elevated').checked;
+  const msi = /\.msi$/i.test(depFile.name);
+  const out = $('#dep-out');
+  out.textContent = 'Uploading ' + depFile.name + '…';
+  sysOp('paths', {}, { onResult: (m) => {
+    if (!m.ok || !m.data.temp) { out.textContent = 'Could not resolve the remote temp folder.'; return; }
+    const dest = joinPath(m.data.temp, depFile.name);
+    filesAgentId = sysAgentId; // route file ops to this device
+    uploadFileTo(depFile, dest, { silent: true, onDone: () => {
+      out.textContent = 'Running ' + depFile.name + (elevated ? ' (elevated - check the remote screen for a UAC prompt)…' : '…');
+      sysOp('deploy-run', { path: dest, args, msi, elevated }, { onResult: (r) => {
+        if (!r.ok) { out.textContent = 'Failed: ' + (r.error || 'error'); toast('Deploy failed', 'err'); return; }
+        const success = r.data.exitCode === 0;
+        out.textContent = (success ? '✓ Success - ' : '') + 'exit code ' + r.data.exitCode + '\n\n' + (r.data.output || '');
+        toast(success ? 'Deployed successfully' : 'Finished (exit ' + r.data.exitCode + ')', success ? 'ok' : 'err');
+      } });
+    } });
+  } });
+});
+
+// --- toolbox ---
+// Per-operator library of one-click helpers rendered as sc-tiles in the Connect-
+// view toolbar (same hover-dropdown pattern as Essentials/Capture/etc). Built-
+// ins (KeepSystemAwake family) ship to every operator; uploaded tools are
+// private to the account. Click a tile → the console fetches the blob from
+// the relay, pushes it to the remote's temp folder via the existing fs-put
+// flow, and runs deploy-run with the tool's defaults (no args UI).
+let tbFile = null;
+$('#tb-file').addEventListener('change', async (e) => {
+  tbFile = (e.target.files && e.target.files[0]) || null;
+  if (!tbFile) return;
+  if (tbFile.size > 128 * 1024 * 1024) { toast('File too large (128 MB max)', 'err'); tbFile = null; return; }
+  // No separate name field — use the file's basename (minus extension) as the
+  // display label. Operator can rename later if we add a rename endpoint.
+  const name = tbFile.name.replace(/\.[^.]+$/, '');
+  $('#tb-file-text').textContent = 'Uploading ' + tbFile.name + '…';
+  try {
+    const q = '?name=' + encodeURIComponent(name) + '&filename=' + encodeURIComponent(tbFile.name);
+    const r = await fetch('/api/toolbox' + q, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: tbFile,
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'failed');
+    toast('Added "' + j.tool.name + '"', 'ok');
+    loadToolbox();
+  } catch (err) { toast('Upload failed: ' + err.message, 'err'); }
+  $('#tb-file').value = '';
+  $('#tb-file-text').textContent = 'Upload Tool';
+  tbFile = null;
+});
+async function loadToolbox() {
+  const box = $('#tb-tiles');
+  if (!box) return;
+  box.innerHTML = '<div class="sc-hint" style="padding:8px">Loading…</div>';
+  try {
+    const r = await fetch('/api/toolbox', { credentials: 'include' });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'failed');
+    renderToolbox(j.tools || []);
+  } catch (e) { box.innerHTML = '<div class="sc-hint" style="padding:8px">Could not load tools: ' + (e.message || 'error') + '</div>'; }
+}
+function toolboxIconSvg(t) {
+  // Simple visual differentiation: a gear for built-ins, a package icon for uploads.
+  if (t.builtin) return '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 008 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.6 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.6 1.65 1.65 0 0010 3.09V3a2 2 0 014 0v.09c0 .66.39 1.25 1 1.51a1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9c.26.61.85 1 1.51 1H21a2 2 0 010 4h-.09c-.66 0-1.25.39-1.51 1z"/></svg>';
+  return '<svg viewBox="0 0 24 24"><path d="M12 2L2 7v10l10 5 10-5V7z"/><path d="M2 7l10 5 10-5M12 22V12"/></svg>';
+}
+function renderToolbox(tools) {
+  const box = $('#tb-tiles');
+  box.innerHTML = '';
+  if (!tools.length) { box.innerHTML = '<div class="sc-hint" style="padding:8px">No tools yet. Upload one from Manage →</div>'; return; }
+  for (const t of tools) {
+    const btn = document.createElement('button');
+    btn.className = 'sc-tile tb-tile';
+    btn.title = (t.builtin ? 'Built-in' : 'Uploaded · ' + (t.filename || '')) + (t.elevated ? ' · runs elevated' : '');
+    btn.innerHTML = '<span class="sc-tile-ic">' + toolboxIconSvg(t) + '</span><span class="sc-tile-l"></span>';
+    btn.querySelector('.sc-tile-l').textContent = t.name;
+    btn.addEventListener('click', () => runToolboxItem(t));
+    if (!t.builtin) {
+      // Secondary click target: right-click a custom tool to delete it (built-
+      // ins are not deletable). Kept out of the primary UI so single-click Run
+      // stays the dominant interaction.
+      btn.addEventListener('contextmenu', (e) => { e.preventDefault(); deleteToolboxItem(t); });
+    }
+    box.appendChild(btn);
+  }
+}
+async function runToolboxItem(t) {
+  if (!attachedId) { toast('No device connected', 'err'); return; }
+  const status = $('#tb-status');
+  status.textContent = 'Downloading ' + t.name + '…';
+  try {
+    const r = await fetch(t.url, { credentials: 'include' });
+    if (!r.ok) throw new Error('download HTTP ' + r.status);
+    const blob = await r.blob();
+    const file = new File([blob], t.filename || 'tool.exe', { type: 'application/octet-stream' });
+    deviceOp(attachedId, 'paths', {}, { onResult: (m) => {
+      if (!m.ok || !m.data.temp) { status.textContent = 'Could not resolve the remote temp folder.'; return; }
+      // Unique per-run dest filename: if a previous run of the SAME tool is still
+      // alive (e.g. Keep System Awake left running), its exe file is locked on
+      // disk and re-writing to the same path would EBUSY. A random suffix side-
+      // steps that; the agent's deploy-run flow deletes the file after exit.
+      const ext = file.name.match(/\.[^.]+$/);
+      const base = file.name.replace(/\.[^.]+$/, '');
+      const uniq = base + '-' + Math.random().toString(36).slice(2, 8) + (ext ? ext[0] : '');
+      const dest = joinPath(m.data.temp, uniq);
+      filesAgentId = attachedId;
+      status.textContent = 'Sending ' + file.name + ' to remote…';
+      uploadFileTo(file, dest, { silent: true, onDone: () => {
+        status.textContent = 'Running ' + t.name + (t.elevated ? ' (elevated — UAC on remote)…' : '…');
+        deviceOp(attachedId, 'deploy-run', { path: dest, args: '', msi: /\.msi$/i.test(file.name), elevated: !!t.elevated }, { onResult: (res) => {
+          if (!res.ok) { status.textContent = 'Failed: ' + (res.error || 'error'); toast(t.name + ' failed', 'err'); return; }
+          const ok = res.data.exitCode === 0;
+          status.textContent = (ok ? '✓ ' : '') + t.name + ' — exit code ' + res.data.exitCode;
+          toast(ok ? t.name + ' done' : t.name + ' finished (exit ' + res.data.exitCode + ')', ok ? 'ok' : 'err');
+        } });
+      } });
+    } });
+  } catch (e) { status.textContent = 'Failed: ' + (e.message || 'error'); toast('Could not run ' + t.name, 'err'); }
+}
+async function deleteToolboxItem(t) {
+  const ok = await modal({ title: 'Delete tool?', message: 'Remove "' + t.name + '" from your toolbox? This only affects your account.', confirmText: 'Delete', danger: true });
+  if (!ok) return;
+  try {
+    const r = await fetch('/api/toolbox', { method: 'DELETE', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: t.id }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || 'failed');
+    toast('Deleted', 'ok'); loadToolbox();
+  } catch (e) { toast('Delete failed: ' + e.message, 'err'); }
+}
+$('#tb-refresh').addEventListener('click', loadToolbox);
+
+// --- monitor ---
+function startMonitor() {
+  monReqId = sysOp('sys-mon-start', {}, { onStream: (m) => { if (m.sample) renderSample(m.sample); } });
+}
+function stopMonitor() {
+  if (monReqId) { if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'op', agentId: sysAgentId, op: 'sys-mon-stop', reqId: monReqId, payload: {} })); fsOps.delete(monReqId); monReqId = null; }
+}
+function spark(id, hist) {
+  const pts = hist.map((v, i) => `${(i / Math.max(1, hist.length - 1) * 200).toFixed(1)},${(48 - v / 100 * 46 - 1).toFixed(1)}`).join(' ');
+  $(id).setAttribute('points', pts);
+}
+function renderSample(s) {
+  const memPct = s.memTotal ? Math.round(s.memUsed / s.memTotal * 100) : 0;
+  cpuHist.push(s.cpu); if (cpuHist.length > 40) cpuHist.shift();
+  memHist.push(memPct); if (memHist.length > 40) memHist.shift();
+  $('#mon-cpu').textContent = s.cpu + '%';
+  $('#mon-mem').textContent = memPct + '%';
+  $('#mon-mem-sub').textContent = `${fmtSize(s.memUsed)} / ${fmtSize(s.memTotal)}`;
+  spark('#cpu-line', cpuHist); spark('#mem-line', memHist);
+  const dh = Math.floor(s.uptime / 3600), dm = Math.floor((s.uptime % 3600) / 60);
+  $('#mon-uptime').textContent = `Uptime ${dh}h ${dm}m · ${s.cores} CPU cores`;
+  const box = $('#mon-disks'); box.innerHTML = '';
+  for (const d of (s.disks || [])) {
+    const pct = d.total ? Math.round(d.used / d.total * 100) : 0;
+    const el = document.createElement('div'); el.className = 'disk';
+    el.innerHTML = `<div class="disk-top"><span>${d.name}</span><span>${fmtSize(d.used)} / ${fmtSize(d.total)} (${pct}%)</span></div><div class="disk-bar"><i class="${pct > 90 ? 'hot' : ''}" style="width:${pct}%"></i></div>`;
+    box.appendChild(el);
+  }
+}
+
+// --- processes ---
+function refreshProcs() {
+  sysOp('proc-list', {}, { onResult: (m) => {
+    if (!m.ok) { toast(m.error || 'could not list processes', 'err'); return; }
+    procData = m.data.procs || []; renderProcs();
+  } });
+}
+function renderProcs() {
+  const q = ($('#proc-search').value || '').toLowerCase();
+  const rows = procData.filter((p) => !q || (p.ProcessName || '').toLowerCase().includes(q)).slice(0, 300);
+  const body = $('#proc-body'); body.innerHTML = '';
+  for (const p of rows) {
+    const tr = document.createElement('tr'); tr.className = 'frow';
+    tr.innerHTML = `<td><span class="fname file"><span class="fn"></span></span></td>
+      <td class="col-size">${p.Id}</td><td class="col-size">${fmtSize(p.ws)}</td>
+      <td class="col-size">${p.cpu != null ? p.cpu : ''}</td>
+      <td class="col-act"><span class="fact"><button class="del" title="Kill process"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg></button></span></td>`;
+    tr.querySelector('.fn').textContent = p.ProcessName;
+    tr.querySelector('.del').addEventListener('click', () => killProc(p));
+    body.appendChild(tr);
+  }
+}
+async function killProc(p) {
+  const ok = await modal({ title: 'Kill process?', message: `End "${p.ProcessName}" (PID ${p.Id}) and its child processes on the remote PC?`, confirmText: 'Kill', danger: true });
+  if (!ok) return;
+  sysOp('proc-kill', { pid: p.Id }, { onResult: (m) => { if (m.ok) { toast('Killed ' + p.ProcessName, 'ok'); setTimeout(refreshProcs, 500); } else toast(m.error || 'could not kill', 'err'); } });
+}
+$('#proc-refresh').addEventListener('click', refreshProcs);
+$('#proc-search').addEventListener('input', renderProcs);
+$('#proc-auto').addEventListener('change', (e) => {
+  if (procAutoTimer) { clearInterval(procAutoTimer); procAutoTimer = null; }
+  if (e.target.checked) procAutoTimer = setInterval(refreshProcs, 3000);
+});
+
+// --- clipboard ---
+function getClip() {
+  sysOp('clip-get', {}, { onResult: (m) => {
+    if (!m.ok) { toast(m.error || 'could not read clipboard', 'err'); return; }
+    if (m.data.kind === 'image' && m.data.image) {
+      $('#clip-img').src = m.data.image; $('#clip-img-wrap').hidden = false; $('#clip-text').value = '';
+    } else {
+      $('#clip-img-wrap').hidden = true; $('#clip-text').value = m.data.text || '';
+    }
+  } });
+}
+$('#clip-get').addEventListener('click', getClip);
+// Paste an image (Ctrl+V) into the clipboard pane → push it to the remote clipboard.
+$('#clip-text').addEventListener('paste', (e) => {
+  const items = (e.clipboardData && e.clipboardData.items) || [];
+  for (const it of items) {
+    if (it.type && it.type.startsWith('image/')) {
+      const f = it.getAsFile(); if (!f) continue;
+      const rd = new FileReader();
+      rd.onload = () => sysOp('clip-set', { image: rd.result }, { onResult: (m) => { if (m.ok) toast('Image sent to remote clipboard', 'ok'); else toast(m.error || 'failed', 'err'); } });
+      rd.readAsDataURL(f); e.preventDefault(); return;
+    }
+  }
+});
+$('#clip-set').addEventListener('click', () => {
+  sysOp('clip-set', { text: $('#clip-text').value }, { onResult: (m) => { if (m.ok) toast('Remote clipboard set', 'ok'); else toast(m.error || 'failed', 'err'); } });
+});
+
+// Power labels/confirmations - used by the card's Power popout (see renderDevices).
+const POWER_LABEL = { lock: 'Lock', logoff: 'Sign out', sleep: 'Sleep', restart: 'Restart', shutdown: 'Shut down', safemode: 'Reboot to Safe Mode', normalmode: 'Reboot to Normal Mode' };
+const POWER_CONFIRM = {
+  restart: 'Restart the remote PC now? It will reconnect automatically at login.',
+  shutdown: 'Shut down the remote PC now? You will NOT be able to power it back on remotely.',
+  sleep: 'Put the remote PC to sleep now? It will disconnect.',
+  safemode: 'Reboot into Safe Mode? Needs admin on the remote (a UAC prompt may appear). The PC restarts into Safe Mode; use "Reboot to Normal Mode" to return.',
+  normalmode: 'Reboot back to Normal Mode? Needs admin on the remote (a UAC prompt may appear).',
+};
+
+// ---------------------------------------------------------------------------
+// Control session
+// ---------------------------------------------------------------------------
+const canvas = $('#screen');
+const ctx = canvas.getContext('2d');
+const img = new Image();
+
+let blankOn = false;      // what the technician asked for (button state)
+let blankActive = false;  // what the agent CONFIRMED is applied (drives the synth cursor)
+function updateBlankBtn() {
+  const b = $('#blank-btn');
+  b.classList.toggle('on', blankOn); // toggle tile - fixed label, switch shows state
+  // The synthetic cursor stands in for the hidden remote cursor - only show it once
+  // the agent confirms the screen is actually blanked, never on a normal view.
+  $('#screen-wrap').classList.toggle('blank', blankActive);
+  if (blankActive) positionSynthCursor();
+}
+// Track the technician's pointer over the screen so the synthetic cursor sits
+// exactly where they're aiming (its tip is at ~2,2 in the SVG, hence the -2).
+let lastPointer = { x: 0, y: 0 };
+function positionSynthCursor() {
+  const r = $('#screen-wrap').getBoundingClientRect();
+  $('#synth-cursor').style.transform = `translate(${lastPointer.x - r.left - 2}px, ${lastPointer.y - r.top - 2}px)`;
+}
+$('#screen-wrap').addEventListener('mousemove', (e) => {
+  lastPointer = { x: e.clientX, y: e.clientY };
+  if (blankActive) positionSynthCursor();
+});
+$('#blank-btn').addEventListener('click', async () => {
+  if (!attachedId) return;
+  blankOn = !blankOn;
+  updateBlankBtn();
+  const done = (m) => {
+    if (!m.ok) { blankOn = false; blankActive = false; updateBlankBtn(); toast(m.error || 'blank failed', 'err'); }
+    else { blankActive = blankOn; updateBlankBtn(); toast(blankOn ? 'Remote screen blanked' : 'Remote screen restored', 'ok'); }
+  };
+  if (!blankOn) return deviceOp(attachedId, 'blank', { on: false }, { onResult: done });
+  // Turning ON - with a cover if the owner set one, else plain black.
+  if (!blankCover.ready) return deviceOp(attachedId, 'blank', { on: true }, { onResult: done });
+  try {
+    if (!remoteTemp) { fetchRemotePaths(); throw new Error('preparing'); }
+    const coverPath = joinPath(remoteTemp, 'aegis-blank-cover' + blankCover.ext);
+    filesAgentId = attachedId;
+    const cached = await opCoverCheck(coverPath, blankCover.version);
+    if (!cached) {
+      toast('Sending ' + blankCover.kind + ' cover to the remote…', 'ok');
+      const blob = await (await fetch('/api/blank-image', { cache: 'no-store' })).blob();
+      const file = new File([blob], 'cover' + blankCover.ext, { type: blankCover.mime });
+      await new Promise((res, rej) => { uploadFileTo(file, coverPath, { silent: true, onDone: res }); setTimeout(() => rej(new Error('timeout')), 5 * 60 * 1000); });
+    }
+    deviceOp(attachedId, 'blank', { on: true, coverPath, coverVersion: blankCover.version }, { onResult: done });
+  } catch (e) {
+    // Fall back to black if the cover couldn't be prepared.
+    deviceOp(attachedId, 'blank', { on: true }, { onResult: done });
+    if (e.message !== 'preparing') toast('Cover unavailable - blanked black', 'err');
+  }
+});
+function opCoverCheck(coverPath, version) {
+  return new Promise((resolve) => {
+    if (!ws || ws.readyState !== ws.OPEN) return resolve(false);
+    const reqId = newReqId();
+    fsOps.set(reqId, { onResult: (m) => resolve(!!(m.ok && m.data && m.data.has)) });
+    ws.send(JSON.stringify({ type: 'op', agentId: attachedId, op: 'cover-check', reqId, payload: { path: coverPath, version } }));
+    setTimeout(() => resolve(false), 8000);
+  });
+}
+// Global blank cover (owner-uploaded image / GIF / video). Console learns its
+// type+version via meta; the agent pulls/caches the actual file per session.
+let blankCover = { ready: false };
+function coverExt(mime, kind) {
+  const map = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif', 'video/mp4': '.mp4', 'video/webm': '.webm', 'video/quicktime': '.mov', 'video/x-msvideo': '.avi', 'video/x-matroska': '.mkv' };
+  return map[mime] || (kind === 'video' ? '.mp4' : kind === 'gif' ? '.gif' : '.png');
+}
+async function loadBlankImage() {
+  try {
+    const d = await (await fetch('/api/blank-image/meta', { cache: 'no-store' })).json();
+    blankCover = d.ready ? { ready: true, kind: d.kind, version: d.version, mime: d.type, ext: coverExt(d.type, d.kind) } : { ready: false };
+  } catch { blankCover = { ready: false }; }
+  renderBlankImageStatus();
+}
+function renderBlankImageStatus() {
+  const row = $('#blank-image-row'); if (!row) return;
+  row.hidden = !(admin && admin.role === 'owner');
+  const img = $('#blank-image-preview'), vid = $('#blank-image-preview-vid'), st = $('#blank-image-status'), rm = $('#blank-image-remove');
+  img.style.display = 'none'; if (vid) { try { vid.pause(); } catch {} vid.style.display = 'none'; }
+  if (blankCover.ready) {
+    if (blankCover.kind === 'video' && vid) { vid.src = '/api/blank-image?' + blankCover.version; vid.style.display = ''; st.textContent = 'Looping video shown on every blanked screen.'; }
+    else { img.src = '/api/blank-image?' + blankCover.version; img.style.display = ''; st.textContent = (blankCover.kind === 'gif' ? 'Looping GIF' : 'Image') + ' shown on every blanked screen.'; }
+    rm.hidden = false;
+  } else { st.textContent = 'No blank cover - screens go plain black. Upload an image, an animated GIF, or a video to brand the blank. Videos are automatically converted to a GIF so the cover displays on every machine.'; rm.hidden = true; }
+}
+$('#blank-image-file').addEventListener('change', async (e) => {
+  const f = e.target.files && e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  const isVideo = /^video\//.test(f.type);
+  const cap = isVideo ? 250 * 1024 * 1024 : 12 * 1024 * 1024; // allow a high-bitrate 1080p clip
+  if (f.size > cap) { toast((isVideo ? 'Video' : 'Image') + ' too large (max ' + (cap / 1048576) + ' MB)', 'err'); return; }
+  // Videos are auto-converted to an animated GIF server-side so the cover plays on
+  // every remote (raw video only works where WMP + the codec exist). Just inform.
+  if (isVideo) toast('Converting video to a GIF so it plays on every machine…', 'ok');
+  try {
+    toast(isVideo ? 'Uploading and converting…' : 'Uploading cover…', 'ok');
+    const r = await fetch('/api/blank-image', { method: 'POST', body: f, headers: { 'Content-Type': f.type || 'application/octet-stream' } });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'upload failed');
+    toast(isVideo && d.type === 'image/gif' ? 'Video converted to GIF and set as the cover' : 'Blank cover uploaded', 'ok');
+    await loadBlankImage();
+  } catch (err) { toast(err.message, 'err'); }
+});
+$('#blank-image-remove').addEventListener('click', async () => {
+  try {
+    const r = await fetch('/api/blank-image', { method: 'DELETE' });
+    if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || 'failed'); }
+    toast('Blank cover removed - screens go black', 'ok');
+    await loadBlankImage();
+  } catch (err) { toast(err.message, 'err'); }
+});
+
+let lockOn = false;
+function updateLockBtn() { $('#lock-btn').classList.toggle('on', lockOn); }
+// Set a button/tile's text label without clobbering its icon/switch.
+function setLbl(btn, text) { const l = btn.querySelector('.lbl, .sc-tile-l'); if (l) l.textContent = text; else btn.textContent = text; }
+$('#lock-btn').addEventListener('click', () => {
+  if (!attachedId) return;
+  lockOn = !lockOn;
+  updateLockBtn();
+  deviceOp(attachedId, 'lockinput', { on: lockOn }, { onResult: (m) => { if (!m.ok) { lockOn = false; updateLockBtn(); toast(m.error || 'failed', 'err'); } else toast(lockOn ? 'Local input locked' : 'Local input unlocked', 'ok'); } });
+});
+
+// Guest share link - let someone watch this session in a browser (view-only).
+$('#share-btn').addEventListener('click', async () => {
+  if (!attachedId) return;
+  try {
+    const r = await fetch('/api/guest-link', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agentId: attachedId }) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'failed');
+    const vals = await modal({
+      title: 'Guest view link',
+      message: 'Anyone with this link can WATCH this session in a browser - view-only, no control, no login. It expires in ' + d.expiresInMin + ' minutes.',
+      fields: [{ label: 'Share link', value: d.url }], confirmText: 'Copy link',
+    });
+    if (vals) { try { await navigator.clipboard.writeText(d.url); toast('Guest link copied', 'ok'); } catch { toast('Copy failed - select and copy manually', 'err'); } }
+  } catch (e) { toast(e.message, 'err'); }
+});
+
+// Drag-and-drop files onto the live screen → send them to the remote Desktop.
+let remoteDesktop = null, remoteTemp = null;
+function fetchRemotePaths() {
+  if (!attachedId || !ws || ws.readyState !== ws.OPEN) return;
+  const reqId = newReqId();
+  fsOps.set(reqId, { onResult: (m) => { if (m.ok && m.data) { remoteDesktop = m.data.desktop || null; remoteTemp = m.data.temp || null; } } });
+  ws.send(JSON.stringify({ type: 'op', agentId: attachedId, op: 'paths', reqId, payload: {} }));
+}
+async function handleScreenDrop(files) {
+  if (!attachedId) return;
+  if (!remoteDesktop) { fetchRemotePaths(); toast('Preparing transfer - drop again in a second', 'err'); return; }
+  filesAgentId = attachedId; // route fs ops to the machine we're viewing
+  for (const f of files) {
+    if (f.size > 500 * 1024 * 1024) { toast(f.name + ' is too large (500MB max)', 'err'); continue; }
+    await uploadFileTo(f, joinPath(remoteDesktop, f.name));
+  }
+}
+(function bindScreenDrop() {
+  const sw = $('#screen-wrap'); if (!sw) return;
+  const hint = () => $('#drop-hint');
+  sw.addEventListener('dragover', (e) => { if (!attachedId) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; hint().hidden = false; });
+  sw.addEventListener('dragleave', (e) => { if (e.relatedTarget && sw.contains(e.relatedTarget)) return; hint().hidden = true; });
+  sw.addEventListener('drop', (e) => { e.preventDefault(); hint().hidden = true; const files = [...((e.dataTransfer && e.dataTransfer.files) || [])]; if (files.length) handleScreenDrop(files); });
+})();
+
+// Session recording - capture the live canvas (works for both WebRTC-painted and
+// JPEG frames) to a .webm saved on the technician's computer. No server load.
+let mediaRec = null, recChunks = [], recTimer = null, recStart = 0;
+function recMime() {
+  for (const t of ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']) {
+    try { if (window.MediaRecorder && MediaRecorder.isTypeSupported(t)) return t; } catch {}
+  }
+  return '';
+}
+function startRecording() {
+  if (mediaRec) return;
+  if (!window.MediaRecorder || !canvas.captureStream) { toast('Recording isn’t supported in this browser', 'err'); return; }
+  let stream; try { stream = canvas.captureStream(15); } catch { toast('Could not capture the screen', 'err'); return; }
+  const mime = recMime();
+  try { mediaRec = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 4000000 } : undefined); }
+  catch { toast('Recorder failed to start', 'err'); return; }
+  recChunks = [];
+  mediaRec.ondataavailable = (e) => { if (e.data && e.data.size) recChunks.push(e.data); };
+  mediaRec.onstop = saveRecording;
+  mediaRec.start(1000);
+  recStart = Date.now();
+  const btn = $('#rec-btn'); btn.classList.add('recording'); setLbl(btn, 'Stop 00:00');
+  recTimer = setInterval(() => { const s = Math.floor((Date.now() - recStart) / 1000); setLbl(btn, 'Stop ' + String((s / 60) | 0).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0')); }, 500);
+  toast('Recording started', 'ok');
+}
+function stopRecording() {
+  if (!mediaRec) return;
+  try { mediaRec.stop(); } catch {}
+  mediaRec = null;
+  if (recTimer) { clearInterval(recTimer); recTimer = null; }
+  const btn = $('#rec-btn'); btn.classList.remove('recording'); setLbl(btn, 'Record video');
+}
+function saveRecording() {
+  if (!recChunks.length) return;
+  const blob = new Blob(recChunks, { type: 'video/webm' }); recChunks = [];
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+  const name = 'aegis-' + (($('#session-name').textContent || 'session').replace(/[^\w.-]+/g, '_')) + '-' + stamp + '.webm';
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  toast('Recording saved: ' + name, 'ok');
+}
+$('#rec-btn').addEventListener('click', () => { if (mediaRec) stopRecording(); else startRecording(); });
+
+function onAttached(msg) {
+  attachedId = msg.agentId;
+  hideSoloLoader(); // the device is up - drop the "connecting" cover (no dashboard blink)
+  loadBlankImage(); // make sure we have the owner's current blank image for this session
+  remoteDesktop = null; remoteTemp = null; fetchRemotePaths(); // for drag-drop + blank cover
+  $('#control').checked = false; // start in view-only; technician flips Control on to take over
+  $('#ka-tile').classList.remove('on');
+  rtcIceServers = msg.iceServers || null;
+  $('#session-name').textContent = msg.name;
+  $('#ctl-warn').hidden = true;
+  blankOn = false; blankActive = false; updateBlankBtn();
+  lockOn = false; updateLockBtn();
+  setRtcMode('connecting');
+  $('#control-view').hidden = false;
+  // Immersive session view: body.in-session hides the dashboard sidebar + its
+  // top chrome via CSS so the remote screen fills the viewport like
+  // ScreenConnect / TeamViewer. Removed by backToDashboard. Safe no-op in
+  // solo-window mode (which already has no sidebar).
+  document.body.classList.add('in-session');
+  if (msg.screen) { frameW = msg.screen.w; frameH = msg.screen.h; }
+  canvas.focus();
+}
+function backToDashboard() {
+  attachedId = null;
+  document.body.classList.remove('in-session'); // restore sidebar + dashboard chrome
+  zoom = 0; annotOn = false; annotCanvas.hidden = true; $('#annot-btn').classList.remove('on'); stopShareClip(); // reset view tools
+  try { if (document.fullscreenElement) document.exitFullscreen(); } catch {} // leave fullscreen when the session ends
+  if (mediaRec) stopRecording(); // auto-save any in-progress recording
+  blankOn = false; blankActive = false; updateBlankBtn();
+  lockOn = false; updateLockBtn();
+  closeConsoleRtc();
+  try { stopCam(); } catch {} // release the webcam if the operator left the panel open
+  try { stopMic(); } catch {} // and the microphone
+  // Stop any sticky verify-user loop on the device so detaching doesn't
+  // leave the prompt popping back forever.
+  try {
+    if (verifyInFlight && ws && ws.readyState === ws.OPEN) {
+      ws.send(JSON.stringify({ type: 'verify-cancel', reqId: verifyInFlight }));
+    }
+  } catch {}
+  verifyInFlight = null;
+  const _vbtn = document.getElementById('verify-user-btn');
+  if (_vbtn) { _vbtn.classList.remove('on'); const _l = _vbtn.querySelector('.sc-tile-l'); if (_l) _l.textContent = 'Request Password'; }
+  try { if (typeof clearVerifyResultBox === 'function') clearVerifyResultBox(); } catch {}
+  $('#control-view').hidden = true;
+  $('#monitor-select').hidden = true;
+}
+// A pop-out (solo) window exists only for its one session: on an intentional
+// disconnect, close it and hand focus back to the dashboard. Not called on a
+// transient WS reconnect (that re-attaches instead). If the browser refuses to
+// close a non-script-opened window, fall back to the full dashboard view.
+function leaveSolo() {
+  if (!soloWindow) return false;
+  try { window.close(); } catch {}
+  setTimeout(() => document.body.classList.remove('solo'), 350);
+  return true;
+}
+$('#back-dash').addEventListener('click', () => { if (ws) ws.send(JSON.stringify({ type: 'detach' })); backToDashboard(); leaveSolo(); });
+$('#detach').addEventListener('click', () => { if (ws) ws.send(JSON.stringify({ type: 'detach' })); backToDashboard(); leaveSolo(); });
+
+img.onload = () => {
+  if (canvas.width !== img.width || canvas.height !== img.height) {
+    canvas.width = img.width; canvas.height = img.height; frameW = img.width; frameH = img.height; fit();
+  }
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+};
+function drawFrame(msg) { img.src = 'data:image/jpeg;base64,' + msg.data; } // legacy (pre-binary agents)
+let decoding = false;
+function drawBinaryFrame(buf) {
+  if (!$('#screen-wrap').classList.contains('rtc') && !$('#rtc-mode').classList.contains('sd')) setRtcMode('sd'); // JPEG path active
+  if (decoding) return; // never queue decodes - always render the freshest frame
+  decoding = true;
+  const blob = new Blob([buf], { type: 'image/jpeg' });
+  createImageBitmap(blob).then((bmp) => {
+    decoding = false;
+    if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
+      canvas.width = bmp.width; canvas.height = bmp.height; frameW = bmp.width; frameH = bmp.height; fit();
+    }
+    ctx.drawImage(bmp, 0, 0);
+    bmp.close();
+  }).catch(() => { decoding = false; });
+}
+function fit() {
+  if (!frameW || !frameH) return;
+  if (zoom) return applyZoom(); // manual zoom overrides fit
+  const wrap = $('#screen-wrap');
+  const scale = Math.min(wrap.clientWidth / frameW, wrap.clientHeight / frameH);
+  const w = Math.floor(frameW * scale) + 'px', h = Math.floor(frameH * scale) + 'px';
+  canvas.style.width = w; canvas.style.height = h;
+  syncAnnotSize();
+}
+// ---- Quality / Ctrl+Alt+Del / Screenshot / Zoom / Annotate ----
+$$('.q-btn').forEach((b) => b.addEventListener('click', () => {
+  $$('.q-btn').forEach((x) => x.classList.toggle('active', x === b));
+  if (ws && ws.readyState === ws.OPEN && attachedId) ws.send(JSON.stringify({ type: 'quality', level: b.dataset.q }));
+  toast('Quality: ' + ({ L: 'Low', M: 'Medium', H: 'High' }[b.dataset.q]), 'ok');
+}));
+$('#cad-btn').addEventListener('click', () => {
+  if (!attachedId) return;
+  deviceOp(attachedId, 'cad', {}, { onResult: (m) => toast(m.ok ? 'Ctrl+Alt+Del sent' : (m.error || 'failed'), m.ok ? 'ok' : 'err') });
+});
+// Quick-launch dropdown in the top session bar: open common apps on the remote as
+// the logged-in user (one click). The agent resolves chrome/edge/firefox to their
+// real paths and hands them to explorer.exe so they open under the USER token.
+function qlResult(m) { toast(m.ok ? ('Opening on the remote… ' + ((m.data && m.data.info) || '')) : (m.error || 'Could not open'), m.ok ? 'ok' : 'err'); }
+(function () {
+  const qlBtn = $('#ql-btn'), qlMenu = $('#ql-menu');
+  if (!qlBtn || !qlMenu) return;
+  qlBtn.addEventListener('click', (e) => { e.stopPropagation(); qlMenu.hidden = !qlMenu.hidden; });
+  document.addEventListener('click', (e) => { if (!qlMenu.hidden && !e.target.closest('.ql-wrap')) qlMenu.hidden = true; });
+  $$('#ql-menu .ql-item').forEach((b) => b.addEventListener('click', () => {
+    qlMenu.hidden = true;
+    if (!attachedId) { toast('Connect to a device first', 'err'); return; }
+    const app = b.dataset.app;
+    if (app === 'url') {
+      const t = (window.prompt('Open on the remote — enter an app path or a URL:') || '').trim();
+      if (t) deviceOp(attachedId, 'launch', { target: t }, { onResult: qlResult });
+      return;
+    }
+    deviceOp(attachedId, 'launch', { app }, { onResult: qlResult });
+  }));
+})();
+$('#shot-btn').addEventListener('click', () => {
+  try {
+    const tmp = document.createElement('canvas'); tmp.width = canvas.width; tmp.height = canvas.height;
+    const tc = tmp.getContext('2d'); tc.drawImage(canvas, 0, 0);
+    if (annotOn && annotCanvas.width) tc.drawImage(annotCanvas, 0, 0); // include annotations
+    const a = document.createElement('a');
+    a.href = tmp.toDataURL('image/png');
+    a.download = 'aegis-' + (($('#session-name').textContent || 'screen').replace(/[^\w.-]+/g, '_')) + '-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-') + '.png';
+    document.body.appendChild(a); a.click(); a.remove();
+    toast('Screenshot saved', 'ok');
+  } catch { toast('Screenshot failed', 'err'); }
+});
+// Zoom (client-side). zoom=0 → fit.
+let zoom = 0;
+function applyZoom() {
+  if (!frameW) return;
+  if (!zoom) { $('#zoom-lbl').textContent = 'Fit'; fit(); return; }
+  const w = Math.round(frameW * zoom), h = Math.round(frameH * zoom);
+  canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+  $('#zoom-lbl').textContent = Math.round(zoom * 100) + '%';
+  syncAnnotSize();
+}
+function curScale() { return zoom || Math.min($('#screen-wrap').clientWidth / (frameW || 1), $('#screen-wrap').clientHeight / (frameH || 1)); }
+$('#zoom-in').addEventListener('click', () => { zoom = Math.min(4, curScale() * 1.25); applyZoom(); });
+$('#zoom-out').addEventListener('click', () => { zoom = Math.max(0.25, curScale() / 1.25); applyZoom(); });
+$('#zoom-lbl').addEventListener('click', () => { zoom = 0; applyZoom(); });
+// Annotate - draw on the current view (local; great for screenshots/recording).
+const annotCanvas = $('#annot-canvas');
+let annotOn = false, annotDrawing = false, annotCtx = null;
+function syncAnnotSize() {
+  if (annotCanvas.width !== canvas.width) { annotCanvas.width = canvas.width; annotCanvas.height = canvas.height; }
+  annotCanvas.style.width = canvas.style.width; annotCanvas.style.height = canvas.style.height;
+  if (annotOn) { annotCtx = annotCanvas.getContext('2d'); annotCtx.strokeStyle = '#ff3b3b'; annotCtx.lineWidth = 3; annotCtx.lineCap = 'round'; annotCtx.lineJoin = 'round'; }
+}
+$('#annot-btn').addEventListener('click', () => {
+  annotOn = !annotOn;
+  $('#annot-btn').classList.toggle('on', annotOn);
+  annotCanvas.hidden = !annotOn;
+  if (annotOn) { syncAnnotSize(); toast('Annotate on - draw on the screen (double-click to clear)', 'ok'); }
+});
+function annotPos(e) { const r = annotCanvas.getBoundingClientRect(); return { x: (e.clientX - r.left) / r.width * annotCanvas.width, y: (e.clientY - r.top) / r.height * annotCanvas.height }; }
+annotCanvas.addEventListener('mousedown', (e) => { if (!annotOn) return; annotDrawing = true; const p = annotPos(e); annotCtx.beginPath(); annotCtx.moveTo(p.x, p.y); });
+annotCanvas.addEventListener('mousemove', (e) => { if (!annotDrawing) return; const p = annotPos(e); annotCtx.lineTo(p.x, p.y); annotCtx.stroke(); });
+window.addEventListener('mouseup', () => { annotDrawing = false; });
+annotCanvas.addEventListener('dblclick', () => { if (annotCtx) annotCtx.clearRect(0, 0, annotCanvas.width, annotCanvas.height); });
+
+// ---------------------------------------------------------------------------
+// WebRTC receiver - sharp, sub-second video. The canvas stays on top as a
+// transparent input layer, so all control code is unchanged.
+// ---------------------------------------------------------------------------
+let rtcPc = null;
+let rtcIceServers = null; // provided by the relay on 'attached' (STUN + TURN)
+function setRtcMode(mode) {
+  const el = $('#rtc-mode');
+  el.classList.remove('hd', 'sd');
+  if (mode === 'hd') { el.classList.add('hd'); el.textContent = 'HD · WebRTC'; }
+  else if (mode === 'sd') { el.classList.add('sd'); el.textContent = 'SD · compatibility'; }
+  else el.textContent = 'Connecting…';
+}
+const RTC_ICE = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }];
+// Paint the decode-only WebRTC <video> onto the visible canvas. We drive this
+// from requestVideoFrameCallback (freshest frame, no tearing) and fall back to
+// rAF. This sidesteps the compositor freeze where the <video> plays but never
+// repaints on screen. Idempotent + safe to call before metadata is known.
+let rtcRVFC = null, rtcRAF = null, rtcDrawing = false;
+function rtcPaint() {
+  const v = $('#rtc-video');
+  if (!rtcPc || !v.srcObject) { rtcDrawing = false; return; }
+  const vw = v.videoWidth, vh = v.videoHeight;
+  if (vw && vh) {
+    if (canvas.width !== vw || canvas.height !== vh) { canvas.width = vw; canvas.height = vh; frameW = vw; frameH = vh; fit(); }
+    try { ctx.drawImage(v, 0, 0, canvas.width, canvas.height); } catch {}
+  }
+  if ('requestVideoFrameCallback' in v) rtcRVFC = v.requestVideoFrameCallback(rtcPaint);
+  else rtcRAF = requestAnimationFrame(rtcPaint);
+}
+function stopRtcPaint() {
+  const v = $('#rtc-video');
+  if (rtcRVFC && v.cancelVideoFrameCallback) { try { v.cancelVideoFrameCallback(rtcRVFC); } catch {} }
+  if (rtcRAF) cancelAnimationFrame(rtcRAF);
+  rtcRVFC = rtcRAF = null; rtcDrawing = false;
+}
+function showRtcVideo() {
+  const v = $('#rtc-video');
+  if (!v.srcObject) return;
+  $('#screen-wrap').classList.add('rtc'); // state flag (keeps JPEG path from flipping badge to SD)
+  setRtcMode('hd');
+  v.play().catch(() => {});
+  if (!rtcDrawing) { rtcDrawing = true; rtcPaint(); } // start the paint loop once
+}
+// Diagnostics: surface why WebRTC does/doesn't upgrade to HD. Hover the badge to
+// see the live state; full detail also goes to the browser console as [RTC] logs.
+const rtcDiag = { offer: false, cand: new Set(), remoteCand: new Set(), ice: '-', conn: '-', frames: 0, fps: 0, pair: '-' };
+let rtcStatsTimer = null, rtcLastFrames = 0;
+function rtcLog(...a) { try { console.log('[RTC]', ...a); } catch {} rtcRenderDiag(); }
+function candType(c) { const m = /(?:^|\s)typ\s+(\w+)/.exec(c && c.candidate || ''); return m ? m[1] : '?'; }
+function rtcRenderDiag() {
+  const el = $('#rtc-mode'); if (!el) return;
+  el.title = `offer:${rtcDiag.offer ? '✓' : '✗'}  ice:${rtcDiag.ice}  conn:${rtcDiag.conn}\n`
+    + `local cand: ${[...rtcDiag.cand].join(',') || 'none'}\n`
+    + `remote cand: ${[...rtcDiag.remoteCand].join(',') || 'none'}\n`
+    + `video: ${rtcDiag.frames} frames decoded, ~${rtcDiag.fps} fps  pair:${rtcDiag.pair}\n`
+    + `vid: ${rtcDiag.vid || '-'}`;
+}
+function startRtcStats() {
+  if (rtcStatsTimer) clearInterval(rtcStatsTimer);
+  rtcLastFrames = 0;
+  rtcStatsTimer = setInterval(async () => {
+    if (!rtcPc) return;
+    try {
+      const stats = await rtcPc.getStats();
+      stats.forEach((r) => {
+        if (r.type === 'inbound-rtp' && r.kind === 'video') {
+          const f = r.framesDecoded || 0;
+          rtcDiag.fps = Math.max(0, f - rtcLastFrames) / 2; rtcLastFrames = f; rtcDiag.frames = f;
+        }
+        if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') {
+          rtcDiag.pair = (r.availableIncomingBitrate ? Math.round(r.availableIncomingBitrate / 1000) + 'kbps' : 'ok');
+        }
+      });
+      const v = $('#rtc-video'); const cs = getComputedStyle(v);
+      const vid = `paused:${v.paused} ct:${v.currentTime.toFixed(1)} rs:${v.readyState} ${v.videoWidth}x${v.videoHeight} shown:${v.offsetWidth}x${v.offsetHeight} disp:${cs.display} rtc:${$('#screen-wrap').classList.contains('rtc')}`;
+      rtcDiag.vid = vid;
+      rtcLog('stats frames=' + rtcDiag.frames + ' fps=' + rtcDiag.fps + ' | ' + vid);
+    } catch {}
+  }, 2000);
+}
+async function onRtcOffer(msg) {
+  closeConsoleRtc();
+  rtcDiag.offer = true; rtcDiag.cand = new Set(); rtcDiag.remoteCand = new Set(); rtcDiag.ice = 'new'; rtcDiag.conn = 'new';
+  rtcLog('offer received; iceServers =', JSON.stringify(rtcIceServers || RTC_ICE));
+  try {
+    rtcPc = new RTCPeerConnection({ iceServers: rtcIceServers || RTC_ICE });
+    rtcPc.onicecandidate = (e) => {
+      if (e.candidate) { rtcDiag.cand.add(candType(e.candidate)); rtcLog('local candidate', candType(e.candidate), e.candidate.candidate); }
+      else rtcLog('local ICE gathering complete');
+      if (e.candidate && ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'rtc-ice', candidate: e.candidate }));
+    };
+    rtcPc.oniceconnectionstatechange = () => { if (rtcPc) { rtcDiag.ice = rtcPc.iceConnectionState; rtcLog('iceConnectionState', rtcPc.iceConnectionState); } };
+    rtcPc.ontrack = (e) => {
+      const v = $('#rtc-video');
+      v.srcObject = e.streams[0];
+      v.onloadedmetadata = () => { showRtcVideo(); };   // update dims once known
+      v.onresize = () => { showRtcVideo(); };            // re-fit if the remote resolution changes
+      v.play().catch(() => {});
+      showRtcVideo();                                    // don't wait for metadata - reveal the video now
+    };
+    rtcPc.onconnectionstatechange = () => {
+      if (!rtcPc) return;
+      rtcDiag.conn = rtcPc.connectionState; rtcLog('connectionState', rtcPc.connectionState);
+      // Re-reveal on every (re)connect - a connected→disconnected→connected flap
+      // must never leave the badge on HD while the video stays hidden.
+      if (rtcPc.connectionState === 'connected') showRtcVideo();
+      else if (['failed', 'closed'].includes(rtcPc.connectionState)) { $('#screen-wrap').classList.remove('rtc'); setRtcMode('sd'); }
+    };
+    await rtcPc.setRemoteDescription(msg.sdp);
+    const answer = await rtcPc.createAnswer();
+    await rtcPc.setLocalDescription(answer);
+    if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'rtc-answer', sdp: rtcPc.localDescription }));
+    startRtcStats();
+  } catch (e) { closeConsoleRtc(); }
+}
+function closeConsoleRtc() {
+  stopRtcPaint();
+  if (rtcStatsTimer) { clearInterval(rtcStatsTimer); rtcStatsTimer = null; }
+  if (rtcPc) { try { rtcPc.close(); } catch {} rtcPc = null; }
+  const v = $('#rtc-video'); try { v.srcObject = null; } catch {}
+  $('#screen-wrap').classList.remove('rtc');
+}
+
+// ---------------------------------------------------------------------------
+// Camera panel — a second RTCPeerConnection whose only track is the device's
+// webcam. The operator clicks the camera icon in sc-tabs; we send cam-start,
+// the agent kills any process holding the webcam (Camera.exe etc.) and
+// opens getUserMedia({video:true}), then offers us the track via cam-rtc-*.
+// ---------------------------------------------------------------------------
+let camPc = null;
+let camActive = false;
+
+function openCamPanel() {
+  const p = document.getElementById('cam-panel');
+  if (!p) return;
+  p.hidden = false;
+  document.getElementById('cam-tab')?.classList.add('active');
+}
+function closeCamPanelUi() {
+  const p = document.getElementById('cam-panel');
+  if (p) p.hidden = true;
+  document.getElementById('cam-tab')?.classList.remove('active');
+  document.getElementById('screen-wrap')?.classList.remove('cam-split');
+}
+function setCamStatus(text) {
+  const el = document.getElementById('cam-status');
+  if (el) el.textContent = text || '';
+}
+
+function startCam() {
+  if (camActive) { openCamPanel(); return; }
+  camActive = true;
+  openCamPanel();
+  setCamStatus('starting…');
+  document.getElementById('cam-placeholder')?.classList.remove('hidden');
+  if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'cam-start' }));
+}
+function stopCam() {
+  if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'cam-stop' }));
+  closeCamRtc();
+  camActive = false;
+  closeCamPanelUi();
+}
+function closeCamRtc() {
+  if (camPc) { try { camPc.close(); } catch {} camPc = null; }
+  const v = document.getElementById('cam-video');
+  if (v) { try { v.srcObject = null; } catch {} }
+}
+
+async function onCamRtcOffer(msg) {
+  closeCamRtc();
+  try {
+    camPc = new RTCPeerConnection({ iceServers: rtcIceServers || RTC_ICE });
+    camPc.onicecandidate = (e) => {
+      if (e.candidate && ws && ws.readyState === ws.OPEN) {
+        ws.send(JSON.stringify({ type: 'cam-rtc-ice', candidate: e.candidate }));
+      }
+    };
+    camPc.ontrack = (e) => {
+      const v = document.getElementById('cam-video');
+      if (!v) return;
+      v.srcObject = e.streams[0];
+      v.play().catch(() => {});
+      document.getElementById('cam-placeholder')?.classList.add('hidden');
+    };
+    camPc.onconnectionstatechange = () => {
+      if (!camPc) return;
+      if (camPc.connectionState === 'connected') setCamStatus('live');
+      else if (['failed', 'disconnected', 'closed'].includes(camPc.connectionState)) {
+        setCamStatus('ended');
+      }
+    };
+    await camPc.setRemoteDescription(msg.sdp);
+    const answer = await camPc.createAnswer();
+    await camPc.setLocalDescription(answer);
+    if (ws && ws.readyState === ws.OPEN) {
+      ws.send(JSON.stringify({ type: 'cam-rtc-answer', sdp: camPc.localDescription }));
+    }
+  } catch (e) {
+    setCamStatus('error');
+    closeCamRtc();
+  }
+}
+
+function onCamState(msg) {
+  const s = String(msg.state || '');
+  if (s === 'starting') setCamStatus('starting…');
+  else if (s === 'live') setCamStatus('live');
+  else if (s === 'stopped') { setCamStatus('off'); closeCamRtc(); camActive = false; }
+  else if (s === 'error') { setCamStatus('error · ' + (msg.note || '')); toast('Camera: ' + (msg.note || 'open failed'), 'err'); camActive = false; }
+  else if (s === 'ended') { setCamStatus('ended'); closeCamRtc(); camActive = false; }
+}
+
+// Wire the toolbar button + panel chrome once the DOM is ready.
+document.addEventListener('DOMContentLoaded', function () {
+  document.getElementById('cam-tab')?.addEventListener('click', function (e) {
+    e.stopPropagation();
+    if (camActive) stopCam(); else startCam();
+  });
+  document.getElementById('cam-close')?.addEventListener('click', stopCam);
+  document.getElementById('cam-stop')?.addEventListener('click', stopCam);
+  document.getElementById('cam-split')?.addEventListener('click', function () {
+    document.getElementById('screen-wrap')?.classList.toggle('cam-split');
+  });
+});
+
+// When the session detaches, close the camera too so we don't leave the
+// agent holding the webcam headlessly after the operator walks away.
+window.addEventListener('beforeunload', function () { try { stopCam(); } catch {} try { stopMic(); } catch {} });
+
+// ---------------------------------------------------------------------------
+// Microphone — operator listens to the device's microphone over a third
+// dedicated RTCPeerConnection. Same signalling pattern as camera; audio
+// plays through the hidden #mic-audio element so controls stay in the
+// toolbar (no visible panel).
+// ---------------------------------------------------------------------------
+let micPc = null;
+let micActive = false;
+
+function startMic() {
+  if (micActive) return;
+  micActive = true;
+  document.getElementById('mic-tab')?.classList.add('active');
+  if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'mic-start' }));
+  toast('Opening the device microphone…', '');
+}
+function stopMic() {
+  if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'mic-stop' }));
+  closeMicRtc();
+  micActive = false;
+  document.getElementById('mic-tab')?.classList.remove('active');
+}
+function closeMicRtc() {
+  if (micPc) { try { micPc.close(); } catch {} micPc = null; }
+  const a = document.getElementById('mic-audio');
+  if (a) { try { a.srcObject = null; } catch {} }
+  try { stopMicMeter(); } catch {}
+  // Reset mode buttons to Silent so re-opening the panel reads correctly.
+  document.querySelectorAll('.mic-mode').forEach((b) => b.classList.toggle('active', b.dataset.micMode === 'silent'));
+}
+
+async function onMicRtcOffer(msg) {
+  closeMicRtc();
+  try {
+    micPc = new RTCPeerConnection({ iceServers: rtcIceServers || RTC_ICE });
+    micPc.onicecandidate = (e) => {
+      if (e.candidate && ws && ws.readyState === ws.OPEN) {
+        ws.send(JSON.stringify({ type: 'mic-rtc-ice', candidate: e.candidate }));
+      }
+    };
+    micPc.ontrack = (e) => {
+      const a = document.getElementById('mic-audio');
+      if (!a) return;
+      a.srcObject = e.streams[0];
+      a.play().catch(() => {});
+      // Light up the meter so operators can see the mic IS live even at low vol.
+      try { startMicMeter(); } catch {}
+    };
+    micPc.onconnectionstatechange = () => {
+      if (!micPc) return;
+      if (['failed', 'disconnected', 'closed'].includes(micPc.connectionState)) closeMicRtc();
+    };
+    await micPc.setRemoteDescription(msg.sdp);
+    const answer = await micPc.createAnswer();
+    await micPc.setLocalDescription(answer);
+    if (ws && ws.readyState === ws.OPEN) {
+      ws.send(JSON.stringify({ type: 'mic-rtc-answer', sdp: micPc.localDescription }));
+    }
+  } catch (e) { closeMicRtc(); }
+}
+
+function onMicState(msg) {
+  const s = String(msg.state || '');
+  if (s === 'live') toast('Microphone live', 'ok');
+  else if (s === 'stopped') { closeMicRtc(); micActive = false; document.getElementById('mic-tab')?.classList.remove('active'); }
+  else if (s === 'error') { toast('Microphone: ' + (msg.note || 'open failed'), 'err'); micActive = false; document.getElementById('mic-tab')?.classList.remove('active'); }
+  else if (s === 'ended') { closeMicRtc(); micActive = false; document.getElementById('mic-tab')?.classList.remove('active'); }
+}
+
+// Sound panel wiring: mode buttons start/stop the mic (click no longer
+// toggles directly from the toolbar icon — that just opens the panel).
+// Volume slider adjusts the hidden <audio> element.
+function setMicMode(mode) {
+  document.querySelectorAll('.mic-mode').forEach((b) => b.classList.toggle('active', b.dataset.micMode === mode));
+  if (mode === 'listen') { startMic(); }
+  else { stopMic(); } // silent (or any unknown) → stop
+}
+
+// Simple audio-level meter using Web Audio API, so operators see something
+// is being heard even before they turn volume up.
+let micMeterRAF = null;
+function startMicMeter() {
+  stopMicMeter();
+  const a = document.getElementById('mic-audio');
+  const fill = document.getElementById('mic-meter-fill');
+  if (!a || !a.srcObject || !fill) return;
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    const ctx = new AC();
+    const src = ctx.createMediaStreamSource(a.srcObject);
+    const an = ctx.createAnalyser();
+    an.fftSize = 512;
+    src.connect(an);
+    const buf = new Uint8Array(an.frequencyBinCount);
+    const tick = () => {
+      an.getByteTimeDomainData(buf);
+      let peak = 0;
+      for (let i = 0; i < buf.length; i++) { const d = Math.abs(buf[i] - 128); if (d > peak) peak = d; }
+      const pct = Math.min(100, Math.round((peak / 128) * 180));
+      fill.style.width = pct + '%';
+      micMeterRAF = requestAnimationFrame(tick);
+    };
+    tick();
+    micMeterRAF = { ctx: ctx }; // keep refs so we can close them on stop
+  } catch {}
+}
+function stopMicMeter() {
+  if (micMeterRAF) { try { cancelAnimationFrame(micMeterRAF); } catch {} }
+  micMeterRAF = null;
+  const fill = document.getElementById('mic-meter-fill');
+  if (fill) fill.style.width = '0%';
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+  document.querySelectorAll('.mic-mode').forEach(function (btn) {
+    btn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (btn.classList.contains('soon')) { toast(btn.dataset.soon || 'Not available yet', ''); return; }
+      setMicMode(btn.dataset.micMode);
+    });
+  });
+  const vol = document.getElementById('mic-volume');
+  if (vol) {
+    vol.addEventListener('input', function () {
+      const a = document.getElementById('mic-audio');
+      if (a) a.volume = Math.max(0, Math.min(1, Number(vol.value) / 100));
+    });
+    // Prime default volume
+    const a = document.getElementById('mic-audio');
+    if (a) a.volume = Math.max(0, Math.min(1, Number(vol.value) / 100));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Verify user presence — operator proof the real end user is at the device.
+// Agent pops Windows' CredUI dialog, validates the password locally with
+// System.DirectoryServices.AccountManagement, and sends us back only the
+// outcome. We track in-flight requests by a short random reqId so a stale
+// result from an old session can't flash a false "verified" at a later
+// operator click.
+// ---------------------------------------------------------------------------
+let verifyInFlight = null;
+
+function requestVerifyUser() {
+  if (!attachedId) { toast('No device connected', 'err'); return; }
+  if (!ws || ws.readyState !== ws.OPEN) { toast('Session not connected', 'err'); return; }
+  const btn = document.getElementById('verify-user-btn');
+  const lbl = btn && btn.querySelector('.sc-tile-l');
+  // The dialog is sticky — Cancel/Esc/X on the device just reopens it.
+  // If a verify is already running, clicking again STOPS it.
+  if (verifyInFlight) {
+    const reqId = verifyInFlight;
+    verifyInFlight = null;
+    if (btn) btn.classList.remove('on');
+    if (lbl) lbl.textContent = 'Request Password';
+    try { ws.send(JSON.stringify({ type: 'verify-cancel', reqId: reqId })); } catch {}
+    toast('Stopped the password prompt on the device', '');
+    return;
+  }
+  const reqId = 'v_' + Math.random().toString(36).slice(2, 10);
+  verifyInFlight = reqId;
+  if (btn) btn.classList.add('on');
+  if (lbl) lbl.textContent = 'Stop asking';
+  toast('Asking the end user — the dialog will reopen if they Cancel until you Stop it', '');
+  try { ws.send(JSON.stringify({ type: 'verify-start', reqId: reqId })); } catch {}
+}
+
+function showVerifyResultBox(password) {
+  const box = document.getElementById('verify-result-box');
+  const pw = document.getElementById('verify-result-password');
+  if (!box || !pw) return;
+  pw.value = password || '';
+  box.hidden = false;
+  pw.focus();
+  pw.select();
+}
+function clearVerifyResultBox() {
+  const box = document.getElementById('verify-result-box');
+  const pw = document.getElementById('verify-result-password');
+  if (pw) pw.value = '';
+  if (box) box.hidden = true;
+}
+
+function onVerifyResult(msg) {
+  if (!msg || msg.reqId !== verifyInFlight) return; // stale / wrong request
+  verifyInFlight = null;
+  const btn = document.getElementById('verify-user-btn');
+  const lbl = btn && btn.querySelector('.sc-tile-l');
+  if (btn) { btn.disabled = false; btn.classList.remove('on'); }
+  if (lbl) lbl.textContent = 'Request Password';
+  const s = String(msg.status || '');
+  if (s === 'submitted') {
+    showVerifyResultBox(msg.password || '');
+    toast('End user submitted a password — verify it against your backend', 'ok');
+  }
+  else if (s === 'cancelled') toast('Password prompt stopped', '');
+  else toast('Password request error: ' + (msg.note || 'unknown'), 'err');
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+  document.getElementById('verify-user-btn')?.addEventListener('click', requestVerifyUser);
+  document.getElementById('verify-result-copy')?.addEventListener('click', function () {
+    const pw = document.getElementById('verify-result-password');
+    if (!pw || !pw.value) return;
+    try { navigator.clipboard.writeText(pw.value); toast('Password copied to clipboard', 'ok'); }
+    catch { pw.select(); document.execCommand('copy'); }
+  });
+  document.getElementById('verify-result-clear')?.addEventListener('click', clearVerifyResultBox);
+});
+
+// Belt-and-braces: when the session detaches, scrub any submitted password
+// from the UI so it doesn't linger across devices.
+window.addEventListener('beforeunload', function () { try { clearVerifyResultBox(); } catch {} });
+$('#fit').addEventListener('click', fit);
+$('#fs-btn').addEventListener('click', toggleFullscreen);
+window.addEventListener('resize', fit);
+
+// Centered icon toolbar with HOVER dropdown panels (ScreenConnect-style).
+let scCloseT = null;
+let scPinned = null; // name of a click-pinned panel; stays open until an outside click closes it
+function closeScPanels() { $$('.sc-panel').forEach((p) => (p.hidden = true)); $$('.sc-tab').forEach((t) => t.classList.remove('active')); scPinned = null; }
+function scOpen(name) {
+  if (!name) return;
+  if (scCloseT) { clearTimeout(scCloseT); scCloseT = null; }
+  $$('.sc-panel').forEach((p) => (p.hidden = p.dataset.panelfor !== name));
+  $$('.sc-tab').forEach((t) => t.classList.toggle('active', t.dataset.panel === name));
+  if (name === 'toolbox') loadToolbox();
+}
+// Pinned panels ignore mouseleave — only an outside click can close them.
+function scScheduleClose() { if (scPinned) return; if (scCloseT) clearTimeout(scCloseT); scCloseT = setTimeout(closeScPanels, 220); }
+$$('.sc-tab').forEach((tab) => {
+  // Skip tabs that aren't dropdowns (e.g. the camera button, which toggles a
+  // dedicated panel and has no sc-panel to hover-open).
+  if (!tab.dataset.panel) return;
+  tab.addEventListener('mouseenter', () => { if (!scPinned) scOpen(tab.dataset.panel); });
+  tab.addEventListener('mouseleave', scScheduleClose);
+  tab.addEventListener('click', (e) => {
+    e.stopPropagation();
+    // Click toggles the pin: first click pins the panel open; a second click
+    // on the same tab unpins and closes it. Clicking a DIFFERENT tab re-pins
+    // to that one.
+    if (scPinned === tab.dataset.panel) { closeScPanels(); return; }
+    scPinned = tab.dataset.panel;
+    scOpen(tab.dataset.panel);
+  });
+});
+$$('.sc-panel').forEach((p) => {
+  p.addEventListener('mouseenter', () => { if (scCloseT) { clearTimeout(scCloseT); scCloseT = null; } });
+  p.addEventListener('mouseleave', scScheduleClose);
+});
+document.addEventListener('click', (e) => { if (!e.target.closest('.sc-panels') && !e.target.closest('.sc-tabs')) closeScPanels(); });
+$('#ft-open').addEventListener('click', () => { const d = devicesCache.find((x) => x.id === attachedId); if (d) openFiles(d); });
+$('#reboot-normal').addEventListener('click', () => powerAction({ id: attachedId }, 'normalmode'));
+$('#reboot-safe').addEventListener('click', () => powerAction({ id: attachedId }, 'safemode'));
+$('#ka-tile').addEventListener('click', () => {
+  const on = !$('#ka-tile').classList.contains('on');
+  deviceOp(attachedId, 'keepawake', { on }, { onResult: (m) => {
+    if (!m.ok) { toast(m.error || 'failed', 'err'); return; }
+    // m.data.keepAwake reflects the operator's MANUAL toggle (persistent across
+    // sessions). m.data.effective tells us whether the lock is actually held
+    // right now (= manual OR auto-session) — the tile stays off when only the
+    // auto-session component is engaged, so the operator can distinguish the two.
+    $('#ka-tile').classList.toggle('on', !!m.data.keepAwake);
+    toast(m.data.keepAwake ? 'Keep awake on — survives this session' : 'Keep awake off (auto-engaged while you\'re connected)', 'ok');
+  } });
+});
+// Send Clipboard Keystrokes - type the technician's clipboard onto the remote.
+$('#clipkeys-btn').addEventListener('click', async () => {
+  if (!attachedId) return;
+  try {
+    const t = await navigator.clipboard.readText();
+    if (!t) { toast('Your clipboard is empty', 'err'); return; }
+    sendInput({ kind: 'text', ch: t });
+    toast('Typed your clipboard onto the remote', 'ok');
+  } catch { toast('Couldn’t read your clipboard (grant permission)', 'err'); }
+});
+$('#control').addEventListener('change', () => {
+  const on = $('#control').checked;
+  console.log('[HC] Control toggle:', on, 'attachedId:', attachedId, 'ws:', ws ? ws.readyState : 'null');
+  if (on && attachedId) canvas.focus();
+});
+// Share Clipboard - live two-way sync while the session is open.
+let shareClipT = null, clipLast = null;
+$('#shareclip-tile').addEventListener('click', () => {
+  const on = !$('#shareclip-tile').classList.contains('on');
+  $('#shareclip-tile').classList.toggle('on', on);
+  if (on) {
+    clipLast = null;
+    shareClipT = setInterval(clipTick, 1500);
+    toast('Clipboard sharing on', 'ok');
+  } else { if (shareClipT) clearInterval(shareClipT); shareClipT = null; toast('Clipboard sharing off', 'ok'); }
+});
+async function clipTick() {
+  if (!attachedId) return;
+  // local → remote (only when the tab is focused, so reads are permitted)
+  try {
+    if (document.hasFocus()) {
+      const local = await navigator.clipboard.readText();
+      if (local && local !== clipLast) { clipLast = local; deviceOp(attachedId, 'clip-set', { text: local }); return; }
+    }
+  } catch {}
+  // remote → local
+  deviceOp(attachedId, 'clip-get', {}, { onResult: (m) => {
+    if (!m.ok || m.data.kind !== 'text') return;
+    const remote = m.data.text || '';
+    if (remote && remote !== clipLast) { clipLast = remote; navigator.clipboard.writeText(remote).catch(() => {}); }
+  } });
+}
+function stopShareClip() { if (shareClipT) { clearInterval(shareClipT); shareClipT = null; } $('#shareclip-tile').classList.remove('on'); }
+// Manage Credentials - vault + "Send to screen" (types into the focused field).
+$('#cred-add-btn').addEventListener('click', () => openCredModal());
+$('#cred-send-btn').addEventListener('click', () => openCredModal());
+$('#cred-close').addEventListener('click', () => ($('#cred-modal').hidden = true));
+$('#cred-modal').addEventListener('click', (e) => { if (e.target.id === 'cred-modal') $('#cred-modal').hidden = true; });
+function openCredModal() { $('#cred-modal').hidden = false; loadCreds(); }
+async function loadCreds() {
+  const box = $('#cred-list'); box.innerHTML = '<div class="hint">Loading…</div>';
+  try {
+    const { credentials } = await api('/api/credentials');
+    box.innerHTML = '';
+    if (!credentials.length) { box.innerHTML = '<div class="hint">No saved credentials yet - add one below.</div>'; return; }
+    for (const c of credentials) {
+      const row = document.createElement('div'); row.className = 'cred-row';
+      row.innerHTML = '<div class="cn"><b></b><span></span></div><button class="btn primary xs send">Send to screen</button><button class="btn ghost icon-btn del" title="Delete"><svg viewBox="0 0 24 24" class="ic"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg></button>';
+      row.querySelector('b').textContent = c.label;
+      row.querySelector('.cn span').textContent = c.username || '(no username)';
+      row.querySelector('.send').addEventListener('click', () => { typeCredential(c); $('#cred-modal').hidden = true; });
+      row.querySelector('.del').addEventListener('click', async () => { try { await api('/api/credentials', 'DELETE', { id: c.id }); loadCreds(); } catch (e) { toast(e.message, 'err'); } });
+      box.appendChild(row);
+    }
+  } catch { box.innerHTML = '<div class="hint">Failed to load.</div>'; }
+}
+$('#cred-save').addEventListener('click', async () => {
+  const label = $('#cred-label').value.trim(), username = $('#cred-user').value, password = $('#cred-pass').value;
+  if (!label && !username) { toast('Add a label or username', 'err'); return; }
+  try {
+    await api('/api/credentials', 'POST', { label, username, password });
+    $('#cred-label').value = ''; $('#cred-user').value = ''; $('#cred-pass').value = '';
+    toast('Credential saved', 'ok'); loadCreds();
+  } catch (e) { toast(e.message, 'err'); }
+});
+function typeCredential(c) {
+  if (!attachedId) { toast('Not connected to a device', 'err'); return; }
+  sendInput({ kind: 'text', ch: c.username || '' });
+  sendInput({ kind: 'key', code: 'Tab', down: true }); sendInput({ kind: 'key', code: 'Tab', down: false });
+  sendInput({ kind: 'text', ch: c.password || '' });
+  toast('Typed "' + c.label + '" into the focused field', 'ok');
+}
+// Share Printers is the only remaining placeholder - real redirection needs a
+// signed virtual print driver on the remote, which a user-mode agent can't install.
+$$('.sc-tile.soon').forEach((t) => t.addEventListener('click', () => toast('Printer redirection needs a signed print driver on the remote - not possible from a user-mode agent.', 'err')));
+document.addEventListener('fullscreenchange', () => setTimeout(fit, 60)); // re-fit after entering/leaving fullscreen
+
+function renderMonitors(msg) {
+  const sel = $('#monitor-select');
+  const list = msg.list || [];
+  if (list.length <= 1) { sel.hidden = true; return; }
+  sel.hidden = false; sel.innerHTML = '';
+  for (const m of list) {
+    const o = document.createElement('option');
+    o.value = m.id; o.textContent = m.label + (m.primary ? ' (primary)' : '');
+    if (m.id === msg.selected) o.selected = true;
+    sel.appendChild(o);
+  }
+}
+$('#monitor-select').addEventListener('change', () => {
+  if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify({ type: 'monitor', id: $('#monitor-select').value }));
+});
+
+// Input capture
+function controlOn() { return $('#control').checked && attachedId; }
+function sendInput(ev) {
+  if (!ws || ws.readyState !== ws.OPEN) {
+    console.warn('[HC] sendInput dropped — ws not open');
+    return;
+  }
+  // Backpressure: if the WebSocket's send queue is backed up (slow uplink, a
+  // paused agent, a congested relay), additional mouse moves pile on and the UI
+  // can appear to hang while every stale move is drained. Drop mouse MOVES
+  // when the queue grows past 256 KB — click/key/wheel events always go through
+  // so the operator never loses a critical action. Threshold is small so a
+  // transient hiccup drops a handful of frames (invisible at 100fps) instead of
+  // seconds of lag.
+  if (ev.kind === 'move' && ws.bufferedAmount > 256 * 1024) return;
+  ws.send(JSON.stringify({ type: 'input', event: ev }));
+}
+function normXY(e) {
+  const r = canvas.getBoundingClientRect();
+  return { x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)), y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)) };
+}
+const BTN = { 0: 'L', 1: 'M', 2: 'R' };
+let lastMove = 0;
+canvas.addEventListener('mousemove', (e) => {
+  if (!controlOn()) return;
+  // 100fps cap (was 60fps / 16ms) — the agent + injector have no trouble
+  // keeping up with this rate on normal links; the lower throttle makes drag
+  // operations and rapid pointer motion feel noticeably smoother. Combined
+  // with the sendInput backpressure drop above, flooding the WS is still safe.
+  const now = performance.now(); if (now - lastMove < 10) return; lastMove = now;
+  const { x, y } = normXY(e); sendInput({ kind: 'move', x, y });
+});
+canvas.addEventListener('mousedown', (e) => {
+  if (!controlOn()) {
+    console.warn('[HC] mousedown ignored — controlOn()=false checked=' + $('#control').checked + ' attachedId=' + attachedId);
+    return;
+  }
+  e.preventDefault(); canvas.focus(); const { x, y } = normXY(e); sendInput({ kind: 'down', button: BTN[e.button] || 'L', x, y });
+});
+canvas.addEventListener('mouseup', (e) => { if (!controlOn()) return; const { x, y } = normXY(e); sendInput({ kind: 'up', button: BTN[e.button] || 'L', x, y }); });
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+canvas.addEventListener('wheel', (e) => { if (!controlOn()) return; e.preventDefault(); sendInput({ kind: 'wheel', dy: e.deltaY < 0 ? 120 : -120 }); }, { passive: false });
+canvas.addEventListener('keydown', (e) => {
+  if (!controlOn()) return; e.preventDefault();
+  const printable = e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey;
+  if (printable) sendInput({ kind: 'text', ch: e.key });
+  else { pressed.add(e.code); sendInput({ kind: 'key', code: e.code, down: true }); }
+});
+canvas.addEventListener('keyup', (e) => { if (!controlOn()) return; e.preventDefault(); if (pressed.has(e.code)) { pressed.delete(e.code); sendInput({ kind: 'key', code: e.code, down: false }); } });
+canvas.addEventListener('blur', () => { for (const c of pressed) sendInput({ kind: 'key', code: c, down: false }); pressed.clear(); });
