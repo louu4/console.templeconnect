@@ -77,7 +77,7 @@ app.post('/telegram/webhook', async (req, res) => {
       const chatId = callback.message.chat.id;
 
       if (callback.data === 'get_started') {
-        const username = `user_\${crypto.randomBytes(3).toString('hex')}`;
+        const username = `user_${crypto.randomBytes(3).toString('hex')}`;
         const password = crypto.randomBytes(5).toString('hex');
 
         activeUsers.set(username, password);
