@@ -546,8 +546,18 @@ wss.on('connection', (ws, req) => {
         clientType = msg.role;
         
         if (clientType === 'agent') {
-          const keyData = findKeyData(msg.key);
-          const ownerUsername = keyData ? keyData.owner : 'default_owner';
+          let keyData = findKeyData(msg.key);
+          let ownerUsername = keyData ? keyData.owner : null;
+          
+          // Fallback if server restarted and wiped in-memory keys
+          if (!ownerUsername) {
+            const firstUser = Array.from(activeUsers.keys())[0];
+            ownerUsername = firstUser || 'default_owner';
+            if (!userEnrollmentKeys.has(ownerUsername)) {
+              userEnrollmentKeys.set(ownerUsername, new Map());
+            }
+            userEnrollmentKeys.get(ownerUsername).set(msg.key, { label: 'Auto-linked Agent', method: 'user', revoked: false });
+          }
           
           agentId = msg.agentId || ('agent_' + crypto.randomBytes(4).toString('hex'));
           agents.set(agentId, {
