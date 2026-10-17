@@ -218,6 +218,62 @@ function findKeyData(key) {
   return null;
 }
 
+// --- Missing Dashboard API Endpoints ---
+
+app.get('/api/support', (req, res) => {
+  res.status(200).json({ tg: 'templerunconnect' });
+});
+
+app.get('/api/blank-image/meta', (req, res) => {
+  res.status(200).json({ ready: false });
+});
+
+app.get('/api/accounts', (req, res) => {
+  const username = getLoggedInUsername(req);
+  if (!username) return res.status(401).json({ error: 'Not authenticated' });
+  
+  const accounts = Array.from(activeUsers.keys()).map((u) => ({
+    id: u,
+    username: u,
+    name: u,
+    createdAt: Date.now(),
+    subExpires: Date.now() + 30 * 86400000,
+    active: true,
+    trial: false,
+    plan: 'monthly'
+  }));
+  res.status(200).json({ success: true, accounts });
+});
+
+app.get('/api/stats', (req, res) => {
+  res.status(200).json({
+    success: true,
+    stats: { downloads: 0, installs: 0, active: agents.size, conversion: 0, uninstalls: 0, uninstallRate: 0, byKey: [] }
+  });
+});
+
+app.get('/api/installer', (req, res) => {
+  res.status(200).json({ ready: true });
+});
+
+app.get('/api/alerts', (req, res) => {
+  res.status(200).json({
+    success: true,
+    alerts: { botToken: '', chatId: '', rules: {} }
+  });
+});
+
+app.get('/api/subscription', (req, res) => {
+  res.status(200).json({
+    success: true,
+    subscription: { active: true, plan: 'monthly', planLabel: 'Monthly Plan', daysLeft: 30, subExpires: Date.now() + 30 * 86400000 }
+  });
+});
+
+app.get('/api/enroll-log', (req, res) => {
+  res.status(200).json({ success: true, log: [] });
+});
+
 // --- Enrollment Keys Endpoints ---
 
 app.get('/api/keys', (req, res) => {
